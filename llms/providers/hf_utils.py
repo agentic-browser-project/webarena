@@ -1,4 +1,9 @@
-from text_generation import Client
+"""HuggingFace TGI client wrapper.
+
+The ``text_generation`` package is only needed when the user actually selects
+the HF provider. We import it lazily so deployments that only use the OpenAI
+backend (and don't install ``text-generation``) can still import this module.
+"""
 
 
 def generate_from_huggingface_completion(
@@ -9,6 +14,8 @@ def generate_from_huggingface_completion(
     max_new_tokens: int,
     stop_sequences: list[str] | None = None,
 ) -> str:
+    from text_generation import Client  # lazy import — see module docstring
+
     client = Client(model_endpoint, timeout=60)
     generation: str = client.generate(
         prompt=prompt,

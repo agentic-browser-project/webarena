@@ -1,0 +1,6 @@
+2026-05-28 00:22:37,812 [w3] INFO mp.worker: worker 3 started; cfg.host=158.130.4.158
+2026-05-28 00:22:37,841 [w3] INFO mp.worker: worker 3 task 473: resetting ['shopping_admin']
+2026-05-28 00:33:08,229 [w3] INFO logger: [Config file]: /tmp/tmpr_0n5u0l/473.json
+2026-05-28 00:33:08,229 [w3] INFO logger: [Intent]: Cancel order 301
+2026-05-28 00:34:05,817 [w3] INFO mp.worker: worker 3 task 473 done: score=0.0 err=None dt=688.0s
+2026-05-28 00:34:05,818 [w3] INFO mp.worker: worker 3: poison pill, exiting

@@ -1,0 +1,6 @@
+2026-05-27 22:33:17,510 [w5] INFO mp.worker: worker 5 started; cfg.host=158.130.4.158
+2026-05-27 22:33:17,539 [w5] INFO mp.worker: worker 5 task 6: resetting []
+2026-05-27 22:33:23,856 [w5] INFO logger: [Config file]: /tmp/tmp9nbuly8r/6.json
+2026-05-27 22:33:23,857 [w5] INFO logger: [Intent]: What are the top-5 best-selling product in 2023
+2026-05-27 22:34:27,167 [w5] INFO mp.worker: worker 5 task 6 done: score=0.0 err=None dt=69.7s
+2026-05-27 22:34:27,168 [w5] INFO mp.worker: worker 5: poison pill, exiting

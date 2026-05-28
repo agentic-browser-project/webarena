@@ -144,6 +144,23 @@ def config() -> argparse.Namespace:
 
     # logging related
     parser.add_argument("--result_dir", type=str, default="")
+
+    # multi-worker support
+    parser.add_argument(
+        "--worker_id",
+        type=int,
+        default=None,
+        help="If set, this run.py invocation is one worker of a multi-worker "
+        "harness; URL env vars are loaded from mp/config.json for this id and "
+        "the auth folder is per-worker.",
+    )
+    parser.add_argument(
+        "--mp_config_path",
+        type=str,
+        default=None,
+        help="Optional override for mp/config.json path (used with --worker_id).",
+    )
+
     args = parser.parse_args()
 
     # check the whether the action space is compatible with the observation space
@@ -212,6 +229,194 @@ def early_stop(
             return True, f"Same typing action for {k} times"
 
     return False, ""
+
+
+def _apply_worker_env(args: argparse.Namespace) -> None:
+    """If --worker_id is set, override URL env vars and the auth folder root
+    to match this worker's per-replica URLs and per-worker auth state."""
+    if args.worker_id is None:
+        return
+    from mp.config import load_config
+
+    cfg = load_config(args.mp_config_path)
+    for k, v in cfg.env_for(args.worker_id).items():
+        os.environ[k] = v
+    # Per-worker auth folder — used by run_single_task instead of the global .auth dir.
+    os.environ["WEBARENA_AUTH_FOLDER"] = f"{cfg.auth_root}/w{args.worker_id}"
+    os.environ["WEBARENA_WORKER_ID"] = str(args.worker_id)
+    os.makedirs(os.environ["WEBARENA_AUTH_FOLDER"], exist_ok=True)
+
+
+def run_single_task(
+    config_file: str,
+    *,
+    worker_id: int,
+    cfg,
+    args_dict: dict[str, object],
+) -> float:
+    """Run one task end-to-end and return the score.
+
+    Adapter for ``mp.worker._run_one_task`` so a worker process can call
+    the same agent/evaluator machinery a serial ``run.py --test_start_idx``
+    invocation uses. Returns 0.0 on agent failure and re-raises on
+    catastrophic env errors.
+    """
+    # Build an argparse-namespace clone from args_dict so the function below
+    # can be called with the same shape as `test()` would receive.
+    ns = argparse.Namespace(**args_dict)
+    ns.render = False
+    ns.render_screenshot = True
+    ns.save_trace_enabled = bool(args_dict.get("save_trace_enabled", True))
+    ns.current_viewport_only = True
+    ns.worker_id = worker_id
+    ns.mp_config_path = None
+    ns.sleep_after_execution = 2.0
+    ns.parsing_failure_th = int(args_dict.get("parsing_failure_th", 3))  # type: ignore[arg-type,call-overload]
+    ns.repeating_action_failure_th = int(args_dict.get("repeating_action_failure_th", 3))  # type: ignore[arg-type,call-overload]
+    ns.slow_mo = int(args_dict.get("slow_mo", 0))  # type: ignore[arg-type,call-overload]
+    ns.context_length = int(args_dict.get("context_length", 0))  # type: ignore[arg-type,call-overload]
+    ns.max_retry = int(args_dict.get("max_retry", 1))  # type: ignore[arg-type,call-overload]
+    ns.max_obs_length = int(args_dict.get("max_obs_length", 1920))  # type: ignore[arg-type,call-overload]
+    ns.model_endpoint = args_dict.get("model_endpoint", "")
+    ns.stop_token = args_dict.get("stop_token", None)
+    # results dir under cfg.result_dir/w{worker_id}
+    ns.result_dir = f"{cfg.result_dir}/w{worker_id}"
+    os.makedirs(ns.result_dir, exist_ok=True)
+    os.makedirs(f"{ns.result_dir}/traces", exist_ok=True)
+
+    # The agent constructor reads stuff from disk; needs prompt JSON.
+    from agent.prompts import to_json
+    to_json.run()
+
+    agent = construct_agent(ns)
+
+    # Reuse the body of `test()` for one config file. We construct the env
+    # afresh per task; the BrowserContext is rebuilt by env.reset.
+    env = ScriptBrowserEnv(
+        headless=not ns.render,
+        slow_mo=ns.slow_mo,
+        observation_type=ns.observation_type,
+        current_viewport_only=ns.current_viewport_only,
+        viewport_size={
+            "width": ns.viewport_width,
+            "height": ns.viewport_height,
+        },
+        save_trace_enabled=ns.save_trace_enabled,
+        sleep_after_execution=ns.sleep_after_execution,
+    )
+    score = 0.0
+    try:
+        score = _run_one_task_loop(env, agent, ns, config_file)
+    finally:
+        try:
+            env.close()
+        except Exception:
+            pass
+    return float(score)
+
+
+def _run_one_task_loop(env, agent, args, config_file) -> float:
+    """Inner loop: one task end-to-end. Mirrors the body of test() for one task."""
+    render_helper = RenderHelper(config_file, args.result_dir, args.action_set_tag)
+    try:
+        with open(config_file) as f:
+            _c = json.load(f)
+            intent = _c["intent"]
+            task_id = _c["task_id"]
+            if _c["storage_state"]:
+                cookie_file_name = os.path.basename(_c["storage_state"])
+                comb = get_site_comb_from_filepath(cookie_file_name)
+                auth_folder = os.environ.get("WEBARENA_AUTH_FOLDER", tempfile.mkdtemp())
+                # Renew cookie in the per-worker auth folder
+                subprocess.run(
+                    [
+                        "python",
+                        "browser_env/auto_login.py",
+                        "--auth_folder",
+                        auth_folder,
+                        "--site_list",
+                        *comb,
+                    ],
+                    env={**os.environ},
+                )
+                _c["storage_state"] = f"{auth_folder}/{cookie_file_name}"
+                assert os.path.exists(_c["storage_state"])
+                config_file_local = f"{auth_folder}/{os.path.basename(config_file)}"
+                with open(config_file_local, "w") as f:
+                    json.dump(_c, f)
+                config_file = config_file_local
+
+        logger.info(f"[Config file]: {config_file}")
+        logger.info(f"[Intent]: {intent}")
+
+        agent.reset(config_file)
+        trajectory: Trajectory = []
+        obs, info = env.reset(options={"config_file": config_file})
+        state_info: StateInfo = {"observation": obs, "info": info}
+        trajectory.append(state_info)
+
+        meta_data = {"action_history": ["None"]}
+        early_stop_thresholds = {
+            "parsing_failure": args.parsing_failure_th,
+            "repeating_action": args.repeating_action_failure_th,
+        }
+        while True:
+            early_stop_flag, stop_info = early_stop(
+                trajectory, args.max_steps, early_stop_thresholds
+            )
+
+            if early_stop_flag:
+                action = create_stop_action(f"Early stop: {stop_info}")
+            else:
+                try:
+                    action = agent.next_action(
+                        trajectory, intent, meta_data=meta_data
+                    )
+                except ValueError as e:
+                    action = create_stop_action(f"ERROR: {str(e)}")
+
+            trajectory.append(action)
+
+            action_str = get_action_description(
+                action,
+                state_info["info"]["observation_metadata"],
+                action_set_tag=args.action_set_tag,
+                prompt_constructor=agent.prompt_constructor
+                if isinstance(agent, PromptAgent)
+                else None,
+            )
+            render_helper.render(action, state_info, meta_data, args.render_screenshot)
+            meta_data["action_history"].append(action_str)
+
+            if action["action_type"] == ActionTypes.STOP:
+                break
+
+            obs, _, terminated, _, info = env.step(action)
+            state_info = {"observation": obs, "info": info}
+            trajectory.append(state_info)
+
+            if terminated:
+                trajectory.append(create_stop_action(""))
+                break
+
+        evaluator = evaluator_router(config_file)
+        score = evaluator(
+            trajectory=trajectory,
+            config_file=config_file,
+            page=env.page,
+            client=env.get_page_client(env.page),
+        )
+
+        if args.save_trace_enabled:
+            env.save_trace(
+                Path(args.result_dir) / "traces" / f"{task_id}.zip"
+            )
+        return float(score)
+    finally:
+        try:
+            render_helper.close()
+        except Exception:
+            pass
 
 
 def test(
@@ -413,6 +618,10 @@ def dump_config(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     args = config()
+    # Apply per-worker env overrides BEFORE importing modules that read env at
+    # import time. Some browser_env modules already imported above are env-
+    # bound, but their lookup chain still re-reads os.environ for URL fields.
+    _apply_worker_env(args)
     args.sleep_after_execution = 2.0
     prepare(args)
 

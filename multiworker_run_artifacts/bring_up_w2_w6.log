@@ -1,0 +1,167 @@
+2026-05-27 22:05:42,986 INFO bring_up_shopping_admin: loaded config: num_workers=2 host=158.130.4.158
+2026-05-27 22:05:42,986 INFO bring_up_shopping_admin: bumped num_workers -> 7 (saved to mp/config.json)
+2026-05-27 22:05:43,096 INFO bring_up_shopping_admin: step 1/5: ensure shopping_admin golden image tag exists (idempotent)
+2026-05-27 22:05:43,231 INFO mp.bring_up: golden image webarena-shopping_admin-golden:latest already exists — skip
+2026-05-27 22:05:43,232 INFO bring_up_shopping_admin: step 2/5: docker run 5 new replicas (shopping_admin only)
+2026-05-27 22:05:43,232 INFO bring_up_shopping_admin:   -> bringing up shopping_admin worker 2
+2026-05-27 22:05:58,473 INFO mp.bring_up: started shopping_admin_w2 on 7980
+2026-05-27 22:05:58,473 INFO bring_up_shopping_admin:   -> bringing up shopping_admin worker 3
+Traceback (most recent call last):
+  File "/z/wangcy07/webarena-repo/bring_up_shopping_admin_w2_w6.py", line 98, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/z/wangcy07/webarena-repo/bring_up_shopping_admin_w2_w6.py", line 69, in main
+    _docker_run_replica(client, cfg, "shopping_admin", w)
+  File "/z/wangcy07/webarena-repo/mp/bring_up.py", line 148, in _docker_run_replica
+    client.run(cmd, timeout=120)
+  File "/z/wangcy07/webarena-repo/mp/docker_exec.py", line 92, in run
+    raise DockerExecError(
+mp.docker_exec.DockerExecError: docker exec failed (code 125): bash -lc export DOCKER_HOST=unix:///z/wangcy07/webarena/rootless-docker/run/docker.sock; docker run -d --restart unless-stopped --name shopping_admin_w3 -p 8080:80  webarena-shopping_admin-golden:latest
+stdout: 54a7ec8aec260880164d23b0ce90e42f56fcf6a222a4a3d724bf51d45b784006
+
+stderr: docker: Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint shopping_admin_w3 (167817df915b83e66293ad27c8bd54b83ee81e17353295a46b6be946eb7aca67): Bind for 10.0.2.100:8080 failed: port is already allocated
+
+Run 'docker run --help' for more information
+
+2026-05-27 22:08:32,885 INFO bring_up_shopping_admin: loaded config: num_workers=7 host=158.130.4.158
+2026-05-27 22:08:32,885 INFO bring_up_shopping_admin: bumped num_workers -> 7 (saved to mp/config.json)
+2026-05-27 22:08:32,988 INFO bring_up_shopping_admin: step 1/5: ensure shopping_admin golden image tag exists (idempotent)
+2026-05-27 22:08:33,107 INFO mp.bring_up: golden image webarena-shopping_admin-golden:latest already exists — skip
+2026-05-27 22:08:33,107 INFO bring_up_shopping_admin: step 2/5: docker run 5 new replicas (shopping_admin only)
+2026-05-27 22:08:33,108 INFO bring_up_shopping_admin:   -> bringing up shopping_admin worker 2
+2026-05-27 22:08:33,248 INFO bring_up_shopping_admin:   -> bringing up shopping_admin worker 3
+2026-05-27 22:08:45,092 INFO mp.bring_up: started shopping_admin_w3 on 8090
+2026-05-27 22:08:45,092 INFO bring_up_shopping_admin:   -> bringing up shopping_admin worker 4
+2026-05-27 22:08:49,113 INFO mp.bring_up: started shopping_admin_w4 on 8180
+2026-05-27 22:08:49,113 INFO bring_up_shopping_admin:   -> bringing up shopping_admin worker 5
+2026-05-27 22:08:54,444 INFO mp.bring_up: started shopping_admin_w5 on 8280
+2026-05-27 22:08:54,444 INFO bring_up_shopping_admin:   -> bringing up shopping_admin worker 6
+2026-05-27 22:09:02,313 INFO mp.bring_up: started shopping_admin_w6 on 8380
+2026-05-27 22:09:02,313 INFO bring_up_shopping_admin: step 3/5: configure base URL on each new replica (~30 s each)
+2026-05-27 22:09:02,313 INFO bring_up_shopping_admin:   -> configuring shopping_admin worker 2 -> http://158.130.4.158:7980/admin
+2026-05-27 22:09:03,339 INFO mp.bring_up: shopping_admin_w2 booted (HTTP 302)
+2026-05-27 22:09:11,853 INFO bring_up_shopping_admin:   -> configuring shopping_admin worker 3 -> http://158.130.4.158:8090/admin
+2026-05-27 22:09:14,194 INFO mp.bring_up: shopping_admin_w3 booted (HTTP 500)
+Traceback (most recent call last):
+  File "/z/wangcy07/webarena-repo/bring_up_shopping_admin_w2_w6.py", line 98, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/z/wangcy07/webarena-repo/bring_up_shopping_admin_w2_w6.py", line 75, in main
+    configure_replica_magento(client, cfg, "shopping_admin", w, wait_for_boot=True)
+  File "/z/wangcy07/webarena-repo/mp/bring_up.py", line 195, in configure_replica_magento
+    client.exec(
+  File "/z/wangcy07/webarena-repo/mp/docker_exec.py", line 115, in exec
+    return self.run(full, check=check, timeout=timeout, stdin=stdin, capture_output=capture_output)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/z/wangcy07/webarena-repo/mp/docker_exec.py", line 92, in run
+    raise DockerExecError(
+mp.docker_exec.DockerExecError: docker exec failed (code 1): bash -lc export DOCKER_HOST=unix:///z/wangcy07/webarena/rootless-docker/run/docker.sock; docker exec  shopping_admin_w3 bash -lc 'mysql -u magentouser -pMyPassword magentodb -e '"'"'UPDATE core_config_data SET value='"'"'"'"'"'"'"'"'http://158.130.4.158:8090/admin/'"'"'"'"'"'"'"'"' WHERE path IN ('"'"'"'"'"'"'"'"'web/secure/base_url'"'"'"'"'"'"'"'"','"'"'"'"'"'"'"'"'web/unsecure/base_url'"'"'"'"'"'"'"'"');'"'"''
+stdout: 
+stderr: ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)
+
+2026-05-27 22:10:04,763 INFO configure_remaining: loaded cfg: num_workers=7 host=158.130.4.158
+2026-05-27 22:10:04,764 INFO configure_remaining: step 1: wait for MySQL ready + configure each replica
+2026-05-27 22:10:04,764 INFO configure_remaining:   -> waiting for MySQL on shopping_admin_w2 (url=http://158.130.4.158:7980/admin)
+2026-05-27 22:10:05,013 INFO configure_remaining:   -> shopping_admin_w2 mysql ready
+2026-05-27 22:10:05,013 INFO configure_remaining:   -> configuring base URL on shopping_admin_w2
+2026-05-27 22:10:20,752 INFO configure_remaining:   -> waiting for MySQL on shopping_admin_w3 (url=http://158.130.4.158:8090/admin)
+Traceback (most recent call last):
+  File "/z/wangcy07/webarena-repo/configure_remaining.py", line 83, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/z/wangcy07/webarena-repo/configure_remaining.py", line 57, in main
+    wait_for_mysql(client, container)
+  File "/z/wangcy07/webarena-repo/configure_remaining.py", line 30, in wait_for_mysql
+    r = client.exec(
+        ^^^^^^^^^^^^
+  File "/z/wangcy07/webarena-repo/mp/docker_exec.py", line 115, in exec
+    return self.run(full, check=check, timeout=timeout, stdin=stdin, capture_output=capture_output)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/z/wangcy07/webarena-repo/mp/docker_exec.py", line 85, in run
+    proc = subprocess.run(
+           ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2116, in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+  File "/usr/lib/python3.12/subprocess.py", line 1253, in _check_timeout
+    raise TimeoutExpired(
+subprocess.TimeoutExpired: Command '['bash', '-lc', 'export DOCKER_HOST=unix:///z/wangcy07/webarena/rootless-docker/run/docker.sock; docker exec  shopping_admin_w3 bash -lc \'mysql -u magentouser -pMyPassword -e \'"\'"\'SELECT 1\'"\'"\' magentodb\'']' timed out after 15 seconds
+2026-05-27 22:11:32,872 INFO configure_remaining: loaded cfg: num_workers=7 host=158.130.4.158
+2026-05-27 22:11:32,872 INFO configure_remaining: step 1: wait for MySQL ready + configure each replica
+2026-05-27 22:11:32,872 INFO configure_remaining:   -> waiting for MySQL on shopping_admin_w2 (url=http://158.130.4.158:7980/admin)
+2026-05-27 22:11:33,030 INFO configure_remaining:   -> shopping_admin_w2 mysql ready
+2026-05-27 22:11:33,031 INFO configure_remaining:   -> configuring base URL on shopping_admin_w2
+2026-05-27 22:11:38,647 INFO configure_remaining:   -> waiting for MySQL on shopping_admin_w3 (url=http://158.130.4.158:8090/admin)
+2026-05-27 22:11:38,829 INFO configure_remaining:   -> shopping_admin_w3 mysql ready
+2026-05-27 22:11:38,829 INFO configure_remaining:   -> configuring base URL on shopping_admin_w3
+Traceback (most recent call last):
+  File "/z/wangcy07/webarena-repo/configure_remaining.py", line 84, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/z/wangcy07/webarena-repo/configure_remaining.py", line 60, in main
+    configure_replica_magento(client, cfg, "shopping_admin", w, wait_for_boot=False)
+  File "/z/wangcy07/webarena-repo/mp/bring_up.py", line 195, in configure_replica_magento
+    client.exec(
+  File "/z/wangcy07/webarena-repo/mp/docker_exec.py", line 115, in exec
+    return self.run(full, check=check, timeout=timeout, stdin=stdin, capture_output=capture_output)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/z/wangcy07/webarena-repo/mp/docker_exec.py", line 85, in run
+    proc = subprocess.run(
+           ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2116, in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+  File "/usr/lib/python3.12/subprocess.py", line 1253, in _check_timeout
+    raise TimeoutExpired(
+subprocess.TimeoutExpired: Command '['bash', '-lc', 'export DOCKER_HOST=unix:///z/wangcy07/webarena/rootless-docker/run/docker.sock; docker exec  shopping_admin_w3 bash -lc \'mysql -u magentouser -pMyPassword magentodb -e \'"\'"\'UPDATE core_config_data SET value=\'"\'"\'"\'"\'"\'"\'"\'"\'http://158.130.4.158:8090/admin/\'"\'"\'"\'"\'"\'"\'"\'"\' WHERE path IN (\'"\'"\'"\'"\'"\'"\'"\'"\'web/secure/base_url\'"\'"\'"\'"\'"\'"\'"\'"\',\'"\'"\'"\'"\'"\'"\'"\'"\'web/unsecure/base_url\'"\'"\'"\'"\'"\'"\'"\'"\');\'"\'"\'\'']' timed out after 30 seconds
+2026-05-27 22:14:14,549 INFO configure_remaining: loaded cfg: num_workers=7 host=158.130.4.158
+2026-05-27 22:14:14,549 INFO configure_remaining: step 1: wait for MySQL ready + configure each replica
+2026-05-27 22:14:14,549 INFO configure_remaining: worker 2 -> container=shopping_admin_w2 url=http://158.130.4.158:7980/admin
+2026-05-27 22:14:15,764 INFO configure_remaining:   -> shopping_admin_w2 mysql ready
+2026-05-27 22:14:15,765 INFO configure_remaining:   -> shopping_admin_w2: UPDATE core_config_data base_url -> http://158.130.4.158:7980/admin/ (timeout=300s)
+2026-05-27 22:14:15,938 INFO configure_remaining:   -> shopping_admin_w2: bin/magento setup:store-config:set --base-url=http://158.130.4.158:7980/admin/
+2026-05-27 22:14:17,453 INFO configure_remaining:   -> shopping_admin_w2: disable admin password rotation
+2026-05-27 22:14:21,371 INFO configure_remaining:   -> shopping_admin_w2: bin/magento cache:flush
+2026-05-27 22:14:22,441 INFO configure_remaining:   -> shopping_admin_w2: configured
+2026-05-27 22:14:22,441 INFO configure_remaining: worker 3 -> container=shopping_admin_w3 url=http://158.130.4.158:8090/admin
+2026-05-27 22:14:22,590 INFO configure_remaining:   -> shopping_admin_w3 mysql ready
+2026-05-27 22:14:22,590 INFO configure_remaining:   -> shopping_admin_w3: UPDATE core_config_data base_url -> http://158.130.4.158:8090/admin/ (timeout=300s)
+2026-05-27 22:14:22,741 INFO configure_remaining:   -> shopping_admin_w3: bin/magento setup:store-config:set --base-url=http://158.130.4.158:8090/admin/
+2026-05-27 22:14:24,695 INFO configure_remaining:   -> shopping_admin_w3: disable admin password rotation
+2026-05-27 22:14:27,595 INFO configure_remaining:   -> shopping_admin_w3: bin/magento cache:flush
+2026-05-27 22:14:28,636 INFO configure_remaining:   -> shopping_admin_w3: configured
+2026-05-27 22:14:28,636 INFO configure_remaining: worker 4 -> container=shopping_admin_w4 url=http://158.130.4.158:8180/admin
+2026-05-27 22:14:30,109 INFO configure_remaining:   -> shopping_admin_w4 mysql ready
+2026-05-27 22:14:30,109 INFO configure_remaining:   -> shopping_admin_w4: UPDATE core_config_data base_url -> http://158.130.4.158:8180/admin/ (timeout=300s)
+2026-05-27 22:14:31,419 INFO configure_remaining:   -> shopping_admin_w4: bin/magento setup:store-config:set --base-url=http://158.130.4.158:8180/admin/
+2026-05-27 22:14:33,584 INFO configure_remaining:   -> shopping_admin_w4: disable admin password rotation
+2026-05-27 22:14:38,343 INFO configure_remaining:   -> shopping_admin_w4: bin/magento cache:flush
+2026-05-27 22:14:39,337 INFO configure_remaining:   -> shopping_admin_w4: configured
+2026-05-27 22:14:39,337 INFO configure_remaining: worker 5 -> container=shopping_admin_w5 url=http://158.130.4.158:8280/admin
+2026-05-27 22:14:39,483 INFO configure_remaining:   -> shopping_admin_w5 mysql ready
+2026-05-27 22:14:39,483 INFO configure_remaining:   -> shopping_admin_w5: UPDATE core_config_data base_url -> http://158.130.4.158:8280/admin/ (timeout=300s)
+2026-05-27 22:14:39,645 INFO configure_remaining:   -> shopping_admin_w5: bin/magento setup:store-config:set --base-url=http://158.130.4.158:8280/admin/
+2026-05-27 22:14:41,551 INFO configure_remaining:   -> shopping_admin_w5: disable admin password rotation
+2026-05-27 22:14:44,226 INFO configure_remaining:   -> shopping_admin_w5: bin/magento cache:flush
+2026-05-27 22:14:45,274 INFO configure_remaining:   -> shopping_admin_w5: configured
+2026-05-27 22:14:45,274 INFO configure_remaining: worker 6 -> container=shopping_admin_w6 url=http://158.130.4.158:8380/admin
+2026-05-27 22:14:46,542 INFO configure_remaining:   -> shopping_admin_w6 mysql ready
+2026-05-27 22:14:46,542 INFO configure_remaining:   -> shopping_admin_w6: UPDATE core_config_data base_url -> http://158.130.4.158:8380/admin/ (timeout=300s)
+2026-05-27 22:14:46,708 INFO configure_remaining:   -> shopping_admin_w6: bin/magento setup:store-config:set --base-url=http://158.130.4.158:8380/admin/
+2026-05-27 22:14:48,434 INFO configure_remaining:   -> shopping_admin_w6: disable admin password rotation
+2026-05-27 22:14:51,223 INFO configure_remaining:   -> shopping_admin_w6: bin/magento cache:flush
+2026-05-27 22:14:52,275 INFO configure_remaining:   -> shopping_admin_w6: configured
+2026-05-27 22:14:52,275 INFO configure_remaining: step 2: dump shopping_admin golden from worker_0
+2026-05-27 22:15:28,712 INFO configure_remaining:   -> wrote 7720908 bytes -> /z/wangcy07/webarena-mp/golden/shopping_admin/golden.sql in 36.4s
+2026-05-27 22:15:28,712 INFO configure_remaining: step 3: render per-worker task configs (w0..w6)
+2026-05-27 22:15:29,794 INFO configure_remaining: done

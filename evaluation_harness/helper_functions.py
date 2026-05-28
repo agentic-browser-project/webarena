@@ -1,5 +1,6 @@
 """Implements helper functions to assist evaluation cases where other evaluators are not suitable."""
 import json
+import os
 from typing import Any
 from urllib.parse import urlparse
 
@@ -159,7 +160,7 @@ def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
     ]
 
     response = generate_from_openai_chat_completion(
-        model="gpt-4-1106-preview",
+        model=os.environ.get("WEBARENA_EVAL_MODEL", "gpt-4-1106-preview"),
         messages=messages,
         temperature=0,
         max_tokens=768,
@@ -194,7 +195,7 @@ def llm_ua_match(pred: str, reference: str, question: str) -> float:
     ]
 
     response = generate_from_openai_chat_completion(
-        model="gpt-4-1106-preview",
+        model=os.environ.get("WEBARENA_EVAL_MODEL", "gpt-4-1106-preview"),
         messages=messages,
         temperature=0,
         max_tokens=768,

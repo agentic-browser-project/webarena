@@ -1,5 +1,20 @@
 """Tools to generate from OpenAI prompts.
-Adopted from https://github.com/zeno-ml/zeno-build/"""
+Adopted from https://github.com/zeno-ml/zeno-build/
+
+Backend selection (controlled by env vars at import time):
+
+* ``OPENAI_API_BASE`` — if set, every OpenAI client call is redirected to this
+  base URL. Tested with Ollama's OpenAI-compatible endpoint
+  ``http://127.0.0.1:11434/v1`` (via SSH tunnel from hilbit2 → gray). If
+  unset, falls back to api.openai.com (the original behavior).
+* ``OPENAI_API_KEY`` — required for the real OpenAI API; when
+  ``OPENAI_API_BASE`` is set we accept ``"ollama"`` or any non-empty value
+  since Ollama does not validate the key.
+* ``WEBARENA_STRIP_REASONING_TAGS`` — if set to "1", strip any ``<think>...
+  </think>`` blocks from responses before returning them. Required for
+  DeepSeek-R1 / O1-style reasoning models so the WebArena prompt parser sees
+  only the final action.
+"""
 
 import asyncio
 import logging
@@ -12,6 +27,30 @@ import aiolimiter
 import openai
 import openai.error
 from tqdm.asyncio import tqdm_asyncio
+
+from llms.providers._reasoning import strip_reasoning as _strip_reasoning
+
+
+def _setup_openai_api() -> None:
+    """Configure the openai client for the current backend.
+
+    Called by every public entrypoint so the per-process env (which may be
+    set by the multi-worker harness) takes effect for that call.
+    """
+    api_base = os.environ.get("OPENAI_API_BASE", "").strip()
+    if api_base:
+        openai.api_base = api_base
+        # Ollama's OpenAI-compatible endpoint does not check the key but
+        # the openai 0.x SDK refuses to send a request without one set.
+        openai.api_key = os.environ.get("OPENAI_API_KEY", "") or "ollama"
+        openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
+        return
+    if "OPENAI_API_KEY" not in os.environ:
+        raise ValueError(
+            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
+        )
+    openai.api_key = os.environ["OPENAI_API_KEY"]
+    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
 
 
 def retry_with_exponential_backoff(  # type: ignore
@@ -108,12 +147,7 @@ async def agenerate_from_openai_completion(
     Returns:
         List of generated responses.
     """
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
+    _setup_openai_api()
 
     limiter = aiolimiter.AsyncLimiter(requests_per_minute)
     async_responses = [
@@ -128,7 +162,7 @@ async def agenerate_from_openai_completion(
         for prompt in prompts
     ]
     responses = await tqdm_asyncio.gather(*async_responses)
-    return [x["choices"][0]["text"] for x in responses]
+    return [_strip_reasoning(x["choices"][0]["text"]) for x in responses]
 
 
 @retry_with_exponential_backoff
@@ -141,12 +175,7 @@ def generate_from_openai_completion(
     context_length: int,
     stop_token: str | None = None,
 ) -> str:
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
+    _setup_openai_api()
     response = openai.Completion.create(  # type: ignore
         prompt=prompt,
         engine=engine,
@@ -156,7 +185,7 @@ def generate_from_openai_completion(
         stop=[stop_token],
     )
     answer: str = response["choices"][0]["text"]
-    return answer
+    return _strip_reasoning(answer)
 
 
 async def _throttled_openai_chat_completion_acreate(
@@ -213,12 +242,7 @@ async def agenerate_from_openai_chat_completion(
     Returns:
         List of generated responses.
     """
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
+    _setup_openai_api()
 
     limiter = aiolimiter.AsyncLimiter(requests_per_minute)
     async_responses = [
@@ -233,7 +257,7 @@ async def agenerate_from_openai_chat_completion(
         for message in messages_list
     ]
     responses = await tqdm_asyncio.gather(*async_responses)
-    return [x["choices"][0]["message"]["content"] for x in responses]
+    return [_strip_reasoning(x["choices"][0]["message"]["content"]) for x in responses]
 
 
 @retry_with_exponential_backoff
@@ -246,12 +270,7 @@ def generate_from_openai_chat_completion(
     context_length: int,
     stop_token: str | None = None,
 ) -> str:
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
+    _setup_openai_api()
 
     response = openai.ChatCompletion.create(  # type: ignore
         model=model,
@@ -262,7 +281,7 @@ def generate_from_openai_chat_completion(
         stop=[stop_token] if stop_token else None,
     )
     answer: str = response["choices"][0]["message"]["content"]
-    return answer
+    return _strip_reasoning(answer)
 
 
 @retry_with_exponential_backoff

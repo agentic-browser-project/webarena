@@ -2,6 +2,7 @@
 Adopted from https://github.com/zeno-ml/zeno-build/"""
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -10,8 +11,21 @@ from typing import Any
 
 import aiolimiter
 import openai
-import openai.error
 from tqdm.asyncio import tqdm_asyncio
+
+
+def _make_client() -> openai.OpenAI:
+    return openai.OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+        base_url=os.environ.get("OPENAI_API_BASE", None),
+    )
+
+
+def _make_async_client() -> openai.AsyncOpenAI:
+    return openai.AsyncOpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+        base_url=os.environ.get("OPENAI_API_BASE", None),
+    )
 
 
 def retry_with_exponential_backoff(  # type: ignore
@@ -20,7 +34,7 @@ def retry_with_exponential_backoff(  # type: ignore
     exponential_base: float = 2,
     jitter: bool = True,
     max_retries: int = 3,
-    errors: tuple[Any] = (openai.error.RateLimitError,),
+    errors: tuple[Any] = (openai.RateLimitError,),
 ):
     """Retry a function with exponential backoff."""
 
@@ -64,26 +78,32 @@ async def _throttled_openai_completion_acreate(
     max_tokens: int,
     top_p: float,
     limiter: aiolimiter.AsyncLimiter,
-) -> dict[str, Any]:
+) -> Any:
     async with limiter:
         for _ in range(3):
             try:
-                return await openai.Completion.acreate(  # type: ignore
-                    engine=engine,
+                client = _make_async_client()
+                return await client.completions.create(
+                    model=engine,
                     prompt=prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
                 )
-            except openai.error.RateLimitError:
+            except openai.RateLimitError:
                 logging.warning(
                     "OpenAI API rate limit exceeded. Sleeping for 10 seconds."
                 )
                 await asyncio.sleep(10)
-            except openai.error.APIError as e:
+            except openai.APIError as e:
                 logging.warning(f"OpenAI API error: {e}")
                 break
-        return {"choices": [{"message": {"content": ""}}]}
+
+        class _FakeChoice:
+            text = ""
+        class _FakeResp:
+            choices = [_FakeChoice()]
+        return _FakeResp()
 
 
 async def agenerate_from_openai_completion(
@@ -95,26 +115,7 @@ async def agenerate_from_openai_completion(
     context_length: int,
     requests_per_minute: int = 300,
 ) -> list[str]:
-    """Generate from OpenAI Completion API.
-
-    Args:
-        prompts: list of prompts
-        temperature: Temperature to use.
-        max_tokens: Maximum number of tokens to generate.
-        top_p: Top p to use.
-        context_length: Length of context to use.
-        requests_per_minute: Number of requests per minute to allow.
-
-    Returns:
-        List of generated responses.
-    """
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
-
+    """Generate from OpenAI Completion API."""
     limiter = aiolimiter.AsyncLimiter(requests_per_minute)
     async_responses = [
         _throttled_openai_completion_acreate(
@@ -128,7 +129,7 @@ async def agenerate_from_openai_completion(
         for prompt in prompts
     ]
     responses = await tqdm_asyncio.gather(*async_responses)
-    return [x["choices"][0]["text"] for x in responses]
+    return [x.choices[0].text for x in responses]
 
 
 @retry_with_exponential_backoff
@@ -141,21 +142,16 @@ def generate_from_openai_completion(
     context_length: int,
     stop_token: str | None = None,
 ) -> str:
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
-    response = openai.Completion.create(  # type: ignore
+    client = _make_client()
+    response = client.completions.create(
+        model=engine,
         prompt=prompt,
-        engine=engine,
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
-        stop=[stop_token],
+        stop=[stop_token] if stop_token else None,
     )
-    answer: str = response["choices"][0]["text"]
+    answer: str = response.choices[0].text
     return answer
 
 
@@ -166,18 +162,19 @@ async def _throttled_openai_chat_completion_acreate(
     max_tokens: int,
     top_p: float,
     limiter: aiolimiter.AsyncLimiter,
-) -> dict[str, Any]:
+) -> Any:
     async with limiter:
         for _ in range(3):
             try:
-                return await openai.ChatCompletion.acreate(  # type: ignore
+                client = _make_async_client()
+                return await client.chat.completions.create(
                     model=model,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
                 )
-            except openai.error.RateLimitError:
+            except openai.RateLimitError:
                 logging.warning(
                     "OpenAI API rate limit exceeded. Sleeping for 10 seconds."
                 )
@@ -185,10 +182,17 @@ async def _throttled_openai_chat_completion_acreate(
             except asyncio.exceptions.TimeoutError:
                 logging.warning("OpenAI API timeout. Sleeping for 10 seconds.")
                 await asyncio.sleep(10)
-            except openai.error.APIError as e:
+            except openai.APIError as e:
                 logging.warning(f"OpenAI API error: {e}")
                 break
-        return {"choices": [{"message": {"content": ""}}]}
+
+        class _FakeMessage:
+            content = ""
+        class _FakeChoice:
+            message = _FakeMessage()
+        class _FakeResp:
+            choices = [_FakeChoice()]
+        return _FakeResp()
 
 
 async def agenerate_from_openai_chat_completion(
@@ -200,26 +204,7 @@ async def agenerate_from_openai_chat_completion(
     context_length: int,
     requests_per_minute: int = 300,
 ) -> list[str]:
-    """Generate from OpenAI Chat Completion API.
-
-    Args:
-        messages_list: list of message list
-        temperature: Temperature to use.
-        max_tokens: Maximum number of tokens to generate.
-        top_p: Top p to use.
-        context_length: Length of context to use.
-        requests_per_minute: Number of requests per minute to allow.
-
-    Returns:
-        List of generated responses.
-    """
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
-
+    """Generate from OpenAI Chat Completion API."""
     limiter = aiolimiter.AsyncLimiter(requests_per_minute)
     async_responses = [
         _throttled_openai_chat_completion_acreate(
@@ -233,7 +218,23 @@ async def agenerate_from_openai_chat_completion(
         for message in messages_list
     ]
     responses = await tqdm_asyncio.gather(*async_responses)
-    return [x["choices"][0]["message"]["content"] for x in responses]
+    return [x.choices[0].message.content for x in responses]
+
+
+_llm_log_file = None  # file handle, opened lazily
+
+
+def _get_llm_log_file():
+    """Return an open file handle for the per-run LLM exchange log (JSONL)."""
+    global _llm_log_file
+    if _llm_log_file is None:
+        result_dir = os.environ.get("WEBARENA_RESULT_DIR", "")
+        if result_dir:
+            path = os.path.join(result_dir, "llm_logs.jsonl")
+        else:
+            path = "llm_logs.jsonl"
+        _llm_log_file = open(path, "a", buffering=1)  # line-buffered
+    return _llm_log_file
 
 
 @retry_with_exponential_backoff
@@ -246,14 +247,8 @@ def generate_from_openai_chat_completion(
     context_length: int,
     stop_token: str | None = None,
 ) -> str:
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
-
-    response = openai.ChatCompletion.create(  # type: ignore
+    client = _make_client()
+    response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
@@ -261,7 +256,15 @@ def generate_from_openai_chat_completion(
         top_p=top_p,
         stop=[stop_token] if stop_token else None,
     )
-    answer: str = response["choices"][0]["message"]["content"]
+    answer: str = response.choices[0].message.content
+
+    # Log the full exchange as one JSONL line
+    try:
+        record = {"messages": messages, "response": answer}
+        _get_llm_log_file().write(json.dumps(record) + "\n")
+    except Exception as e:
+        logging.warning(f"Failed to write LLM log: {e}")
+
     return answer
 
 
@@ -276,11 +279,5 @@ def fake_generate_from_openai_chat_completion(
     context_length: int,
     stop_token: str | None = None,
 ) -> str:
-    if "OPENAI_API_KEY" not in os.environ:
-        raise ValueError(
-            "OPENAI_API_KEY environment variable must be set when using OpenAI API."
-        )
-    openai.api_key = os.environ["OPENAI_API_KEY"]
-    openai.organization = os.environ.get("OPENAI_ORGANIZATION", "")
     answer = "Let's think step-by-step. This page shows a list of links and buttons. There is a search box with the label 'Search query'. I will click on the search box to type the query. So the action I will perform is \"click [60]\"."
     return answer

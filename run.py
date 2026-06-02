@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -259,7 +260,7 @@ def test(
                     # subprocess to renew the cookie
                     subprocess.run(
                         [
-                            "python",
+                            sys.executable,
                             "browser_env/auto_login.py",
                             "--auth_folder",
                             temp_dir,
@@ -347,7 +348,7 @@ def test(
                     Path(args.result_dir) / "traces" / f"{task_id}.zip"
                 )
 
-        except openai.error.OpenAIError as e:
+        except openai.OpenAIError as e:
             logger.info(f"[OpenAI Error] {repr(e)}")
         except Exception as e:
             logger.info(f"[Unhandled Error] {repr(e)}]")

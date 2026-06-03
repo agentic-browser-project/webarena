@@ -439,6 +439,176 @@ docker ps --format '{{.Names}}' | grep -E '_w[0-9]+$' | xargs -r docker rm -f
 
 ---
 
+## 8. TSA-vs-Dense benchmark workflow
+
+For comparing **TreeSparseAttention (TSA)** against an **SGLang dense baseline** on the same Qwen3-VL-4B-Instruct model, the harness ships dedicated launchers, configs, and a comparison tool. The goal is a research-rigorous pass-rate delta where the only varied factor is the agent's attention mechanism.
+
+### 8.1 Architecture (single-GPU host)
+
+```
+   hilbit2 (websites, no GPU)
+        │
+        │  mp/orchestrator.py → workers → Playwright → docker site replicas
+        │
+        │  SSH tunnels (autossh)
+        ▼
+   gray (RTX 5060 Ti or B200)
+        ├─ tmux "wa-tsa"   →  TSA serve.py        : 10000  (model="tree-sparse")
+        ├─ tmux "wa-dense" →  SGLang launch_server: 10001  (model="qwen3vl-dense")
+        └─ tmux "wa-judge" →  SGLang launch_server: 10002  (model="qwen3vl-judge")
+                                                    ↑
+                              fixed judge — same backend for BOTH agent runs.
+```
+
+The agent talks to **port 10000 (TSA)** or **port 10001 (dense)** via `OPENAI_API_BASE`. The evaluator's LLM judge always talks to **port 10002**, routed through the per-call `judge_endpoint()` shim in `evaluation_harness/_endpoint.py`. This isolates "what the agent saw" from "how the answer was scored".
+
+### 8.2 Files (new in this workflow)
+
+| File | Purpose |
+|---|---|
+| `mp/_inference_common.sh` | autossh tunnel helpers, tmux helpers, `gpu_detect`, `wait_healthy`. |
+| `mp/configs/gpu_profile.sh` | Per-SM tuning table (sm_100, sm_120, fallback). |
+| `mp/configs/config-tsa.json` | MPConfig with `result_dir=…/results-tsa`. |
+| `mp/configs/config-dense.json` | MPConfig with `result_dir=…/results-dense`. |
+| `mp/launch_judge.sh` | Boots the SGLang judge in tmux, opens tunnel :10002. |
+| `mp/launch_tsa.sh` | Boots TSA in tmux, opens tunnel :10000, ensures judge is up. |
+| `mp/launch_dense.sh` | Boots SGLang dense in tmux, opens tunnel :10001, ensures judge is up. |
+| `mp/teardown_inference.sh` | Kills all three tmux sessions + tunnels (or a subset). |
+| `mp/check_template_parity.py` | Verifies both servers format the same messages identically. |
+| `mp/benchmark_compare.py` | Consumes two scores.jsonl files; emits markdown + CSV. |
+| `evaluation_harness/_endpoint.py` | `judge_endpoint()` context manager (per-call endpoint swap). |
+
+### 8.3 Env vars
+
+| Variable | Set by | Purpose |
+|---|---|---|
+| `GPU_HOST` | user (default `wangcy07@gray.cis.upenn.edu`) | SSH target of the GPU machine. |
+| `GPU_SM_HINT` | user (optional) | Override `gpu_detect` (e.g. `100` for B200). |
+| `TS_CUDA_ARCHS` | user (default `100;120`) | TSA kernel build target(s). |
+| `WEBARENA_TOKENIZER_PATH` | launcher | HF path/id for Qwen3-VL-4B tokenizer (max_obs_length accuracy). |
+| `OPENAI_API_BASE`, `OPENAI_API_KEY` | launcher → orchestrator | Agent inference endpoint. |
+| `WEBARENA_EVAL_API_BASE`, `WEBARENA_EVAL_API_KEY`, `WEBARENA_EVAL_MODEL` | launcher → orchestrator → `judge_endpoint()` | Judge inference endpoint (held constant across both runs). |
+| `INFERENCE_BACKEND`, `AGENT_MODEL_NAME` | launcher | Informational; the orchestrator's `--inference_backend` + `--model` should mirror them. |
+
+### 8.4 scores.jsonl row shape (new provenance fields)
+
+Each row now records which backend produced it:
+
+```json
+{"worker_id": 0, "task_id": 78, "score": 1.0, "error": null,
+ "duration_seconds": 173.4,
+ "inference_backend": "tsa", "model": "tree-sparse",
+ "openai_api_base": "http://127.0.0.1:10000/v1",
+ "eval_api_base": "http://127.0.0.1:10002/v1"}
+```
+
+`benchmark_compare.py` reads these fields verbatim and shows them in the report header.
+
+### 8.5 One-time setup (on the GPU host)
+
+```bash
+ssh wangcy07@gray.cis.upenn.edu
+# 1. Pre-download Qwen3-VL-4B-Instruct
+huggingface-cli download Qwen/Qwen3-VL-4B-Instruct \
+    --local-dir ~/hf_models/Qwen3-VL-4B-Instruct
+# 2. Install SGLang
+pip install "sglang[all]>=0.4.3" "flashinfer-python>=0.2"
+# 3. Pre-compile TSA kernels for the local SM. The same artefact also targets
+#    sm_100 (B200) and PTX-falls-back to other Blackwells. ~3 min first time.
+cd ~/TreeSparseAttention_CW
+TS_CUDA_ARCHS="100;120" python -c \
+  "from python.jit_build import build_tree_sparse_kernels; build_tree_sparse_kernels()"
+```
+
+### 8.6 End-to-end run
+
+```bash
+# Activate venv + env on hilbit2
+ssh wangcy07@hilbit2.cis.upenn.edu
+source /z/wangcy07/webarena-venv/bin/activate
+cd /z/wangcy07/webarena-repo
+export PLAYWRIGHT_BROWSERS_PATH=/z/wangcy07/pw_browsers
+export TIKTOKEN_CACHE_DIR=/z/wangcy07/tiktoken_cache
+export NLTK_DATA=/z/wangcy07/nltk_data
+
+# === TSA run ===
+source mp/launch_tsa.sh          # boots judge, then TSA; exports env vars
+
+# Optional: confirm both servers format prompts identically before committing
+# multi-hour CPU time. (Run after BOTH launchers complete; will obviously be
+# skipped during a sequential single-GPU schedule — see §8.7.)
+# python -m mp.check_template_parity --tsa http://127.0.0.1:10000/v1 \
+#                                     --dense http://127.0.0.1:10001/v1
+
+python -m mp.orchestrator \
+    --config mp/configs/config-tsa.json \
+    --start_idx 0 --end_idx 812 \
+    --provider openai --mode chat --model "$AGENT_MODEL_NAME" \
+    --inference_backend tsa \
+    --temperature 0 --top_p 1 --max_tokens 2048 \
+    --max_steps 30 \
+    --instruction_path agent/prompts/jsons/p_cot_id_actree_2s.json
+
+# === Dense run (sequential on 16 GB GPU; keep the judge warm) ===
+bash mp/teardown_inference.sh --tsa-only --keep-judge
+source mp/launch_dense.sh
+python -m mp.orchestrator \
+    --config mp/configs/config-dense.json \
+    --start_idx 0 --end_idx 812 \
+    --provider openai --mode chat --model "$AGENT_MODEL_NAME" \
+    --inference_backend dense \
+    --temperature 0 --top_p 1 --max_tokens 2048 \
+    --max_steps 30 \
+    --instruction_path agent/prompts/jsons/p_cot_id_actree_2s.json
+
+# === Compare ===
+python -m mp.benchmark_compare \
+    --tsa  /z/wangcy07/webarena-mp/results-tsa/scores.jsonl \
+    --dense /z/wangcy07/webarena-mp/results-dense/scores.jsonl \
+    --tasks config_files/test.raw.json \
+    --out comparison_report.md --csv comparison.csv
+
+bash mp/teardown_inference.sh    # final cleanup
+```
+
+### 8.7 Validated concurrency profiles (per-GPU)
+
+Both GPU classes are **first-class** targets; the connector code, launchers, and `mp.orchestrator` are GPU-agnostic. The only knobs that change per arch are tuning defaults in `mp/configs/gpu_profile.sh`. Below are the validated profiles — anything more aggressive than the "validated" column is plausible but unverified on this hardware.
+
+| GPU | SM | VRAM | Default `num_workers` | Default `TSA_MAX_BATCH` | Judge | Concurrent backends | Use-case |
+|---|---|---|---|---|---|---|---|
+| **B200** | sm_100 | 141 GB | **8** (`config-tsa-b200.json` / `config-dense-b200.json`) | **16** | **ON** by default | TSA + dense + judge all coexist | reference rig, full fixed-judge rigor |
+| **RTX 5060 Ti** | sm_120 | 16 GB | **5** (`config-tsa.json` / `config-dense.json`) | **4** | OFF by default (self-judge); ON requires N ≤ 3 | sequential only | minimum target |
+
+**N=5 sm_120 evidence** (verified end-to-end in this session):
+
+1. *Raw HTTP probe (5 parallel `curl POST /v1/chat/completions`)*:
+    - TSA → 5/5 → `200 OK`, wall **2.05 s** (`Collected batch of 4` + `Collected batch of 1` in scheduler log).
+    - Dense → 5/5 → `200 OK`, wall **0.41 s** (`max-running-requests=16` parallelises all 5).
+2. *Orchestrator level* (5 workers, 5 shopping tasks `22, 24, 47, 48, 126`):
+    - TSA: w0–w4 all spawned, 5/5 completed, **PASS=3 / FAIL=2 / ERROR=0**, wall 118 s, no OOM.
+    - Dense: w0–w4 all spawned, 5/5 completed, **PASS=2 / FAIL=3 / ERROR=0**, wall 104 s, no OOM.
+
+The configs ship with both defaults — pick `config-tsa.json`/`config-dense.json` (N=5, 5060 Ti) or `config-tsa-b200.json`/`config-dense-b200.json` (N=8, B200) at the orchestrator's `--config` flag. `gpu_profile.sh` auto-detects the SM from `nvidia-smi` and tunes the inference-server flags accordingly (override with `GPU_SM_HINT=100`).
+
+**Bring-up note for fresh worker replicas**: `mp.bring_up --num_workers 5 --skip_goldens` (or higher) provisions the per-worker docker containers. `mp/bring_up.py`'s MySQL configure-step timeout was raised from 30 s → 180 s to handle cold-boot Magento warm-up. Without this, `configure_replica_magento` would fail with `TimeoutExpired` when an unwarmed Magento container takes >30 s before the in-container mariadb accepts connections.
+
+### 8.8 Pitfalls
+
+- **VRAM ceiling (sm_120 / 5060 Ti)** — TSA(4B) + SGLang-judge(2B) coexist at ~13.5 GB total at `TSA_MAX_BATCH=2`. At `TSA_MAX_BATCH=4` (needed to actually parallelise N=5 batched on the TSA scheduler), the judge no longer fits — drop the judge or drop N. SGLang-dense(4B) + SGLang-judge(2B) does not coexist on a 16 GB card because two SGLang servers fragment too aggressively to share the remaining 6 GB. The smoke-test setup confirmed empirically:
+  - TSA(4B) + Judge(2B) at mem-frac 0.35 → fits; 15.1 GB used.
+  - Dense(4B) alone at mem-frac 0.60 → fits; 10.4 GB used.
+  - Dense(4B) + Judge(2B) at any combination of mem-fracs → SGLang OOMs in `init_memory_pool`.
+
+  Workaround for the dense run on 16 GB: **point the judge at the dense server itself** (`WEBARENA_EVAL_API_BASE=http://127.0.0.1:10001/v1`, `WEBARENA_EVAL_MODEL=qwen3vl-dense`). The dense backend then judges its own answers. This introduces a controlled judge-model asymmetry between runs (TSA-run uses a 2B independent judge, dense-run uses the 4B agent as judge); the `eval_api_base` field in each `scores.jsonl` row records which judge was used so `benchmark_compare.py`'s header shows the asymmetry. On hardware with ≥24 GB the workaround is unnecessary — keep both runs pointed at the fixed 2B judge.
+- **GPU detection** — `mp/_inference_common.sh:gpu_detect` runs `nvidia-smi` on `$GPU_HOST`. On B200 hosts (sm_100), set `GPU_SM_HINT=100` in your shell before sourcing the launcher to skip the SSH call and tune for the bigger card.
+- **Kernel rebuild after pulling new TSA code** — delete `$HOME/.cache/torch_extensions/_tree_sparse_kernels_<archs>/` on the GPU host and re-run the build snippet from §8.5; the per-arch cache key in `jit_build.py` keeps stale builds from being silently loaded.
+- **Judge tunnel must be up before the agent tunnel** — `launch_tsa.sh` and `launch_dense.sh` enforce this by calling `launch_judge.sh` as a pre-step.
+- **Strict-mode comparison** — `benchmark_compare.py` refuses to run if the two scores.jsonl files do not cover the same task_id set. Override only when intentionally comparing a subset (`--no-strict-task-ids`).
+- **Re-run idempotency** — both orchestrator invocations skip task_ids that already have a non-error row in their respective `scores.jsonl`. Interrupted runs resume cleanly.
+
+---
+
 # Appendix: every change shipped for multi-worker support
 
 This appendix lists every code change relative to vanilla WebArena that the multi-worker harness depends on. Each is grouped by file and explains what changed and why.

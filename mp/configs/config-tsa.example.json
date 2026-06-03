@@ -1,0 +1,18 @@
+{
+  "_comment": "TSA agent config — sm_120 / 16 GB consumer-Blackwell (RTX 5060 Ti) profile. N=5 verified. Copy to config-tsa.json and fill the placeholders before use.",
+  "num_workers": 5,
+  "host": "<HOST_OR_IP>",
+  "port_stride": 100,
+  "docker_host": "unix://<PATH_TO_DOCKER_SOCK>",
+  "golden_root": "<DATA_ROOT>/golden",
+  "config_files_root": "<DATA_ROOT>/config_files",
+  "auth_root": "<DATA_ROOT>/auth",
+  "ssh_host": "",
+  "result_dir": "<DATA_ROOT>/results-tsa",
+  "map_replicas": 1,
+  "readonly_url_overrides": {
+    "wikipedia": "http://<HOST_OR_IP>:8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing",
+    "map": "http://<HOST_OR_IP>:13000",
+    "homepage": "http://<HOST_OR_IP>:4399"
+  }
+}

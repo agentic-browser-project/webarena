@@ -188,6 +188,9 @@ def _argparse() -> argparse.ArgumentParser:
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--top_p", type=float, default=0.9)
     p.add_argument("--max_tokens", type=int, default=384)
+    p.add_argument("--stop_token", default=None,
+                   help="stop sequence appended to OpenAI requests (default: none). Plumbed "
+                        "through run.run_single_task into the OpenAI provider.")
     p.add_argument("--max_steps", type=int, default=30)
     p.add_argument("--agent_type", default="prompt")
     p.add_argument("--observation_type", default="accessibility_tree")
@@ -197,23 +200,38 @@ def _argparse() -> argparse.ArgumentParser:
     p.add_argument("--current_viewport_only", action="store_true", default=True)
     p.add_argument("--save_trace_enabled", action="store_true", default=True)
     p.add_argument("--render", action="store_true", default=False)
+    # ── Connector / provenance args ────────────────────────────────────────
+    p.add_argument("--inference_backend", default=None,
+                   choices=[None, "tsa", "dense", "ollama", "openai", "other"],
+                   help="Label for the inference backend; written into each scores.jsonl row "
+                        "for downstream comparison (mp.benchmark_compare).")
+    p.add_argument("--result_dir_override", default=None,
+                   help="Override cfg.result_dir for this run only (e.g. results-tsa). "
+                        "Lets a single mp/config.json drive both TSA and dense runs "
+                        "without editing the file.")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    import dataclasses as _dc
     args = _argparse().parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     cfg = load_config(args.config)
+    if args.result_dir_override:
+        cfg = _dc.replace(cfg, result_dir=args.result_dir_override)
+        log.info("result_dir overridden to %s", cfg.result_dir)
     if args.task_ids:
         task_ids = [int(t.strip()) for t in args.task_ids.split(",") if t.strip()]
     else:
         task_ids = list(range(args.start_idx, args.end_idx))
 
     # Build args_dict that the worker will pass through to run_single_task.
-    excluded = {"config", "task_ids", "start_idx", "end_idx"}
+    # ``result_dir_override`` is consumed by the orchestrator itself (above) and
+    # must not leak into the per-task call signature of run.run_single_task.
+    excluded = {"config", "task_ids", "start_idx", "end_idx", "result_dir_override"}
     args_dict = {k: v for k, v in vars(args).items() if k not in excluded}
 
     result_path = Path(cfg.result_dir) / "scores.jsonl"

@@ -20,6 +20,8 @@ from llms.providers.openai_utils import (
     generate_from_openai_chat_completion,
 )
 
+from evaluation_harness._endpoint import judge_endpoint
+
 
 def shopping_get_auth_token() -> str:
     response = requests.post(
@@ -159,14 +161,15 @@ def llm_fuzzy_match(pred: str, reference: str, question: str) -> float:
         {"role": "user", "content": message},
     ]
 
-    response = generate_from_openai_chat_completion(
-        model=os.environ.get("WEBARENA_EVAL_MODEL", "gpt-4-1106-preview"),
-        messages=messages,
-        temperature=0,
-        max_tokens=768,
-        top_p=1.0,
-        context_length=0,
-    ).lower()
+    with judge_endpoint():
+        response = generate_from_openai_chat_completion(
+            model=os.environ.get("WEBARENA_EVAL_MODEL", "gpt-4-1106-preview"),
+            messages=messages,
+            temperature=0,
+            max_tokens=768,
+            top_p=1.0,
+            context_length=0,
+        ).lower()
     if "partially correct" in response or "incorrect" in response:
         return 0.0
     else:
@@ -194,14 +197,15 @@ def llm_ua_match(pred: str, reference: str, question: str) -> float:
         {"role": "user", "content": message},
     ]
 
-    response = generate_from_openai_chat_completion(
-        model=os.environ.get("WEBARENA_EVAL_MODEL", "gpt-4-1106-preview"),
-        messages=messages,
-        temperature=0,
-        max_tokens=768,
-        top_p=1.0,
-        context_length=0,
-    ).lower()
+    with judge_endpoint():
+        response = generate_from_openai_chat_completion(
+            model=os.environ.get("WEBARENA_EVAL_MODEL", "gpt-4-1106-preview"),
+            messages=messages,
+            temperature=0,
+            max_tokens=768,
+            top_p=1.0,
+            context_length=0,
+        ).lower()
     if "different" in response:
         return 0.0
     else:

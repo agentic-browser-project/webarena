@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -327,20 +328,44 @@ def _run_one_task_loop(env, agent, args, config_file) -> float:
                 cookie_file_name = os.path.basename(_c["storage_state"])
                 comb = get_site_comb_from_filepath(cookie_file_name)
                 auth_folder = os.environ.get("WEBARENA_AUTH_FOLDER", tempfile.mkdtemp())
-                # Renew cookie in the per-worker auth folder
-                subprocess.run(
+                # Renew cookie in the per-worker auth folder.
+                # Use sys.executable so the subprocess inherits this venv
+                # (the system `python` lacks playwright). Prepend the project
+                # root to PYTHONPATH so `from browser_env.env_config import …`
+                # resolves when auto_login.py is invoked as a script.
+                _project_root = Path(__file__).resolve().parent
+                _env = {**os.environ}
+                _pp = _env.get("PYTHONPATH", "")
+                _env["PYTHONPATH"] = (
+                    str(_project_root) + (os.pathsep + _pp if _pp else "")
+                )
+                # Clear any pre-existing stale cookie from a previous task so
+                # a silent auto_login failure (which the audit flagged as a
+                # high-severity stale-session risk) cannot succeed-with-bad-
+                # data: the next assert will fire loudly instead.
+                _expected_cookie = f"{auth_folder}/{cookie_file_name}"
+                if os.path.exists(_expected_cookie):
+                    try:
+                        os.remove(_expected_cookie)
+                    except OSError:
+                        pass
+                _login_proc = subprocess.run(
                     [
-                        "python",
-                        "browser_env/auto_login.py",
+                        sys.executable,
+                        str(_project_root / "browser_env" / "auto_login.py"),
                         "--auth_folder",
                         auth_folder,
                         "--site_list",
                         *comb,
                     ],
-                    env={**os.environ},
+                    env=_env,
+                    cwd=str(_project_root),
                 )
-                _c["storage_state"] = f"{auth_folder}/{cookie_file_name}"
-                assert os.path.exists(_c["storage_state"])
+                _c["storage_state"] = _expected_cookie
+                assert os.path.exists(_c["storage_state"]), (
+                    f"auto_login did not produce {_c['storage_state']} "
+                    f"(returncode={_login_proc.returncode}, sites={comb})"
+                )
                 config_file_local = f"{auth_folder}/{os.path.basename(config_file)}"
                 with open(config_file_local, "w") as f:
                     json.dump(_c, f)
@@ -461,19 +486,33 @@ def test(
                     cookie_file_name = os.path.basename(_c["storage_state"])
                     comb = get_site_comb_from_filepath(cookie_file_name)
                     temp_dir = tempfile.mkdtemp()
-                    # subprocess to renew the cookie
-                    subprocess.run(
+                    # subprocess to renew the cookie. Use sys.executable so the
+                    # child inherits this venv's playwright install. Prepend
+                    # the project root to PYTHONPATH so package imports work
+                    # when auto_login.py is invoked as a script.
+                    _project_root = Path(__file__).resolve().parent
+                    _env = {**os.environ}
+                    _pp = _env.get("PYTHONPATH", "")
+                    _env["PYTHONPATH"] = (
+                        str(_project_root) + (os.pathsep + _pp if _pp else "")
+                    )
+                    _login_proc = subprocess.run(
                         [
-                            "python",
-                            "browser_env/auto_login.py",
+                            sys.executable,
+                            str(_project_root / "browser_env" / "auto_login.py"),
                             "--auth_folder",
                             temp_dir,
                             "--site_list",
                             *comb,
-                        ]
+                        ],
+                        env=_env,
+                        cwd=str(_project_root),
                     )
                     _c["storage_state"] = f"{temp_dir}/{cookie_file_name}"
-                    assert os.path.exists(_c["storage_state"])
+                    assert os.path.exists(_c["storage_state"]), (
+                        f"auto_login did not produce {_c['storage_state']} "
+                        f"(returncode={_login_proc.returncode}, sites={comb})"
+                    )
                     # update the config file
                     config_file = f"{temp_dir}/{os.path.basename(config_file)}"
                     with open(config_file, "w") as f:

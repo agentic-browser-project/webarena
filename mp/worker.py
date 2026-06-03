@@ -39,6 +39,14 @@ class TaskResult:
     score: float | None
     error: str | None
     duration_seconds: float
+    # Provenance fields recorded into scores.jsonl so the comparison tool can
+    # tell which run produced each row. ``inference_backend`` mirrors the
+    # ``--inference_backend`` orchestrator flag (e.g. "tsa" / "dense"); the
+    # other two snapshot the runtime model name and OpenAI base URL.
+    inference_backend: str | None = None
+    model: str | None = None
+    openai_api_base: str | None = None
+    eval_api_base: str | None = None
 
 
 def _apply_env(cfg: MPConfig, worker_id: int) -> None:
@@ -77,6 +85,11 @@ def _run_one_task(
     triggers the env-time import in the worker's own process env.
     """
     start = time.monotonic()
+    inference_backend = args_dict.get("inference_backend")
+    model_name = args_dict.get("model")
+    openai_api_base = os.environ.get("OPENAI_API_BASE", "") or None
+    eval_api_base = os.environ.get("WEBARENA_EVAL_API_BASE", "") or None
+
     config_path = Path(cfg.config_files_root) / f"w{worker_id}" / f"{task_id}.json"
     if not config_path.exists():
         return TaskResult(
@@ -85,6 +98,10 @@ def _run_one_task(
             score=None,
             error=f"missing config file {config_path}",
             duration_seconds=time.monotonic() - start,
+            inference_backend=inference_backend,
+            model=model_name,
+            openai_api_base=openai_api_base,
+            eval_api_base=eval_api_base,
         )
 
     with config_path.open() as f:
@@ -117,6 +134,10 @@ def _run_one_task(
             score=None,
             error=f"reset failed: {err}",
             duration_seconds=time.monotonic() - start,
+            inference_backend=inference_backend,
+            model=model_name,
+            openai_api_base=openai_api_base,
+            eval_api_base=eval_api_base,
         )
 
     # Run the agent + evaluator. We delegate to run.run_single_task, an
@@ -140,6 +161,10 @@ def _run_one_task(
             score=None,
             error=f"agent failed: {err}",
             duration_seconds=time.monotonic() - start,
+            inference_backend=inference_backend,
+            model=model_name,
+            openai_api_base=openai_api_base,
+            eval_api_base=eval_api_base,
         )
 
     # Update dirty sites set: every mutable site this task touched is now
@@ -153,6 +178,10 @@ def _run_one_task(
         score=float(score),
         error=None,
         duration_seconds=time.monotonic() - start,
+        inference_backend=inference_backend,
+        model=model_name,
+        openai_api_base=openai_api_base,
+        eval_api_base=eval_api_base,
     )
 
 
@@ -202,6 +231,10 @@ def worker_main(
                 score=None,
                 error=f"unhandled: {traceback.format_exc()}",
                 duration_seconds=0.0,
+                inference_backend=args_dict.get("inference_backend"),
+                model=args_dict.get("model"),
+                openai_api_base=os.environ.get("OPENAI_API_BASE", "") or None,
+                eval_api_base=os.environ.get("WEBARENA_EVAL_API_BASE", "") or None,
             )
         result_queue.put(dataclasses.asdict(res))
         log.info(

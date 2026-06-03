@@ -192,10 +192,13 @@ def configure_replica_magento(
         f"UPDATE core_config_data SET value='{base_url_slash}' "
         f"WHERE path IN ('web/secure/base_url','web/unsecure/base_url');"
     )
+    # 180s timeout (was 30s) — fresh Magento containers can take 60-120s before
+    # the in-container MySQL daemon is ready to accept connections, especially
+    # when bring_up is run against several replicas in parallel.
     client.exec(
         container,
         f"mysql -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} {MAGENTO_DB_NAME} -e {shlex.quote(sql)}",
-        timeout=30,
+        timeout=180,
     )
     base_url_for_cli = base_url_slash[:-1]  # CLI rejects trailing slash
     client.exec(

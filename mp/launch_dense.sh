@@ -38,12 +38,15 @@ LOG=\$HOME/.cache/wa_dense.log
 mkdir -p "\$(dirname "\$LOG")"
 attempt() {
     local backend="\$1"
+    # Do not pass --chat-template here. SGLang bundled qwen2-vl template was
+    # designed for Qwen2-VL and breaks Qwen3-VL prompts (vision-pad tokens,
+    # wrong system-marker wrapping). Without that flag SGLang reads the model
+    # native ChatML template from tokenizer_config.json, matching TSA path.
     PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \\
     $SGLANG_PYTHON -m sglang.launch_server \\
         --model-path $DENSE_MODEL_PATH \\
         --host 0.0.0.0 --port $DENSE_PORT \\
         --served-model-name $DENSE_MODEL_NAME \\
-        --chat-template qwen2-vl \\
         --context-length $AGENT_CTX_LEN \\
         --dtype bfloat16 \\
         --mem-fraction-static $MEM_FRAC_AGENT \\

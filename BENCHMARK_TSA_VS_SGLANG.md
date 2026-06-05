@@ -11,7 +11,7 @@ For day-to-day operations see [`mp/TSA_VS_DENSE_RUNBOOK.md`](mp/TSA_VS_DENSE_RUN
 The pass rate of **TSA** vs **dense SGLang** on the WebArena task set, holding the following constant across both runs:
 
 - Model weights: **Qwen3-VL-4B-Instruct** (same path, same revision)
-- Chat template: `qwen2-vl`
+- Chat template: **the model's native template** (read from `tokenizer_config.json` by both backends). **Do NOT pass `--chat-template qwen2-vl` to SGLang** — that bundled template was designed for Qwen2-VL, injects vision-pad tokens, and corrupts Qwen3-VL prompts (the model loses its few-shot format anchor and falls back to memorized `` ```action [X]``` `` syntax which WebArena's parser rejects, causing step-1 parse-failure crashes on every trajectory). See `TSA_VS_DENSE_REPORT.md` §0 for the diagnosis.
 - Sampling: `temperature=0`, `top_p=1`, `max_tokens=2048`, `stop=None`
 - Prefix cache: disabled on both sides (`--disable-radix-cache` on SGLang; TSA has none)
 - Post-processing: no markdown-fence stripping (`--no-strip-fences` on TSA; SGLang has no such processor)
@@ -65,7 +65,7 @@ Per-SM tuning is pinned in [`mp/configs/gpu_profile.sh`](mp/configs/gpu_profile.
 
 ## 4. Repositories and files modified
 
-### TSA repo (`StevenWang-CY/TreeSparseAttention_CW` ↔ `agentic-browser-project/TreeSparseAttention`)
+### TSA repo (`agentic-browser-project/TreeSparseAttention`)
 
 | File | Change |
 |------|--------|
@@ -83,8 +83,8 @@ Per-SM tuning is pinned in [`mp/configs/gpu_profile.sh`](mp/configs/gpu_profile.
 | [`mp/_inference_common.sh`](mp/_inference_common.sh) | Shared helpers: `gpu_detect`, `wait_healthy`, `open_tunnel`, `kill_tunnel` (per-PID safe — does not kill the operator's own SSH shell) |
 | [`mp/configs/gpu_profile.sh`](mp/configs/gpu_profile.sh) | Per-SM tuning: `WEBARENA_NUM_WORKERS`, `TSA_MAX_BATCH`, `MEM_FRAC_AGENT`/`MEM_FRAC_JUDGE`, `JUDGE_FITS`, `CONCURRENT_BACKENDS` |
 | [`mp/launch_tsa.sh`](mp/launch_tsa.sh) | Boot TSA on `$GPU_HOST` (auto-detects SM), open tunnel, export env block to `mp/.inference_env` |
-| [`mp/launch_dense.sh`](mp/launch_dense.sh) | Boot SGLang-dense agent server with FlashInfer→Triton fallback |
-| [`mp/launch_judge.sh`](mp/launch_judge.sh) | Boot the shared SGLang-dense judge (Qwen3-VL-2B-Instruct) on port 10002 |
+| [`mp/launch_dense.sh`](mp/launch_dense.sh) | Boot SGLang-dense agent server with FlashInfer→Triton fallback. **Does NOT pass `--chat-template qwen2-vl`** — SGLang reads the model's native ChatML template from `tokenizer_config.json`. Forcing the qwen2-vl bundled template onto Qwen3-VL corrupts prompts and causes step-1 parse-failure crashes (see `TSA_VS_DENSE_REPORT.md` §0). |
+| [`mp/launch_judge.sh`](mp/launch_judge.sh) | Boot the shared SGLang-dense judge (Qwen3-VL-2B-Instruct) on port 10002. Same chat-template rule as `launch_dense.sh`. |
 | [`mp/teardown_inference.sh`](mp/teardown_inference.sh) | Stop tmux sessions + tunnels; `--keep-judge` skips judge restart between back-to-back runs |
 | [`mp/configs/config-tsa.example.json`](mp/configs/config-tsa.example.json) | sm_120 template: `num_workers=5`; placeholders for host, docker socket, data root. Copy to `config-tsa.json` and edit. |
 | [`mp/configs/config-dense.example.json`](mp/configs/config-dense.example.json) | sm_120 template: `num_workers=5`. Copy to `config-dense.json` and edit. |

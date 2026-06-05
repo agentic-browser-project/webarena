@@ -47,12 +47,14 @@ mkdir -p "\$(dirname "\$LOG")"
 # Try the preferred attention backend; if SGLang exits non-zero within 30s, fall back.
 attempt() {
     local backend="\$1"
+    # Omit --chat-template so SGLang reads the native ChatML template from
+    # tokenizer_config.json (Qwen3-VL was not trained with the qwen2-vl
+    # bundled template). See launch_dense.sh for full rationale.
     PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \\
     $SGLANG_PYTHON -m sglang.launch_server \\
         --model-path $JUDGE_MODEL_PATH \\
         --host 0.0.0.0 --port $JUDGE_PORT \\
         --served-model-name $JUDGE_MODEL_NAME \\
-        --chat-template qwen2-vl \\
         --context-length $JUDGE_CTX_LEN \\
         --max-running-requests 16 \\
         --dtype bfloat16 \\

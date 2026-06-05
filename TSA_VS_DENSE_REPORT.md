@@ -1,9 +1,51 @@
 # TSA-vs-Dense WebArena Benchmark — Final Report
 
-**Author:** Chuyue Wang
-**Audience:** Jiaheng Lu (project lead)
-**Date:** 2026-06-03
-**Status:** Connector complete; audit clean; TSA run finished, Dense run in flight.
+**Date:** 2026-06-03 (original pilot), **2026-06-05 (post-fix update — see §0)**
+**Status:** Connector complete; chat-template root cause diagnosed & fixed; post-fix smoke verified clean.
+
+---
+
+## 0. Post-fix update (2026-06-05)
+
+### Root cause of the original Dense pilot result
+
+A line-by-line audit of all 40 task render HTMLs from the 2026-06-03 pilot revealed that **every non-errored Dense trajectory crashed at step 1 with `Early stop: Failed to parse actions for 3 times`**. The model was producing `` ```action [X]``` `` instead of WebArena's required `` In summary, the next action I will perform is ```click [X]``` `` format. WebArena's action parser rejected this output, producing 30/30 step-1 crashes (the 9 "passes" in §6 came from the LLM judge erroneously equating those crash messages with the reference answer `"N/A"`). **The original pilot's TSA vs Dense numbers below are therefore methodologically invalid as a model-quality comparison** — Dense was never given a chance to attempt the task.
+
+**Root cause**: `mp/launch_dense.sh` and `mp/launch_judge.sh` passed `--chat-template qwen2-vl` to SGLang. The bundled `qwen2-vl` template was designed for the older Qwen2-VL model series — it injects `<|vision_start|><|image_pad|><|vision_end|>` vision-pad tokens and uses Qwen2-era system-marker wrapping. **Qwen3-VL was not trained with this template**; its native template lives in `tokenizer_config.json`. Forcing the wrong template corrupted the prompt structure, the 2-shot agent examples lost their format anchor, and the model fell back to memorized SeeAct-style action syntax.
+
+**xgrammar was not the issue**: xgrammar exists in both SGLang and TSA but is opt-in per request (requires `response_format` / `regex` / `guided_json` in the request body). WebArena's openai client sends plain `chat.completions.create(messages=..., temperature=..., ...)` with no schema, so neither backend uses xgrammar during the agent run. The original output format was supposed to come entirely from prompt-following, which broke when SGLang applied the wrong chat template.
+
+### Fix
+
+Remove `--chat-template qwen2-vl` from both `mp/launch_dense.sh` and `mp/launch_judge.sh`. Without the flag, SGLang reads the model's native ChatML template from `tokenizer_config.json` — the same template TSA already uses via `processor.apply_chat_template()` in `TreeSparseAttention_CW/models/qwen3vl_inference.py`. This restores input parity between TSA and SGLang (not tailoring — both now apply the template the model was trained with).
+
+### Post-fix verification (RTX 5060 Ti, sm_120, hilbit2 driver, gray GPU)
+
+1. **Direct chat-completion probe**: Dense now outputs `Let's think step-by-step. … In summary, the next action I will perform is ```click [101]``` ` with proper chain-of-thought reasoning — correct WebArena format ✅.
+2. **N=3 multiworker smoke on the 5-task subset** (22, 24, 47, 48, 126), self-judging symmetric on both backends:
+
+| | Trajectories reaching `stop` | PASS | FAIL | Errors |
+|---|---|---|---|---|
+| **TSA**   | 5/5 | **3** (22, 24, **48**) | 2 (47, 126) | 0 |
+| **Dense** | 5/5 | 2 (22, 24)            | 3 (47, 48, 126) | 0 |
+
+Per-task agreement on the post-fix smoke:
+
+| Task | Reference | TSA answer | Dense answer | TSA / Dense |
+|------|-----------|------------|--------------|-------------|
+| 22 | `fuzzy_match: N/A` | `N/A` after 2 valid clicks | `N/A` after 2 valid clicks | PASS / PASS (self-judge) |
+| 24 | `fuzzy_match: N/A` | `N/A` after 2 valid clicks | `N/A` after 2 valid clicks | PASS / PASS (self-judge) |
+| 47 | `fuzzy_match: ['0 order', '$0 total spend']` | `"2 orders, $2,004.99"` | `"I cannot determine…"` | FAIL / FAIL (genuine) |
+| 48 | `fuzzy_match: ['0 order', '$0 total spend']` | **`"0 fulfilled orders, $0 total spent"`** | crash after 12 valid steps | **PASS** / FAIL |
+| 126 | `must_include: ['2.56', '649.99']` | crash after 5 valid steps | crash after 5 valid steps | FAIL / FAIL |
+
+**Deterministic-only delta (post-fix)**: TSA 1/3, Dense 0/3 → **+1 task** for TSA (task 48). Both backends now reach real answers; the differences reflect genuine model behavior, not output-format compliance. n=5 is too small for a publishable claim — the methodology is now sound and a full 812-task run on a B200 is the next step.
+
+### What is invalidated below
+
+§6 ("Findings") of this report quotes the 2026-06-03 pilot numbers (TSA 3 / Dense 0 deterministic, 12 / 9 raw). Those numbers **measured output-format compliance**, not model quality. They should not be cited for a TSA-vs-Dense capability claim. The §0 numbers above are the trustworthy post-fix smoke. The §6 audit/agreement/CI methodology remains valid and should be re-applied to the next full run.
+
+---
 
 ---
 

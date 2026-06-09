@@ -394,38 +394,49 @@ To prove a run is correct (not just complete):
    ```
    Expected: `45 passed`.
 
-## 7. Operating runbook for the reference deployment (hilbit2 + gray Ollama)
+## 7. Operating runbook for the reference deployment (orchestrator host + GPU host)
 
-This section is concrete to one deployment. Adapt paths/IPs for your own.
+Concrete to a two-host deployment (one orchestrator + websites box, one GPU box). Adapt paths/hostnames for your own. For the TSA-vs-SGLang benchmark workflow specifically, see §8 — those launchers wrap most of this.
 
 ```bash
-# One-time setup
-ssh wangcy07@hilbit2.cis.upenn.edu
-mkdir -p /z/wangcy07/webarena-mp/{golden,config_files,results,auth,logs}
-
-# Tunnel to gray for Ollama
-nohup ssh -N -f -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 \
-    -L 127.0.0.1:11434:127.0.0.1:11434 wangcy07@158.130.4.227 \
-    < /dev/null > /z/wangcy07/webarena/logs/gray_tunnel.log 2>&1
-# verify: curl http://127.0.0.1:11434/api/tags
+# === Pre-flight on the orchestrator host (drives docker + workers) ===
+ssh user@orchestrator-host
+mkdir -p <DATA_ROOT>/{golden,config_files,results,auth,logs}
 
 # Activate the venv + env
-source /z/wangcy07/webarena-venv/bin/activate
-cd /z/wangcy07/webarena-repo
-export PLAYWRIGHT_BROWSERS_PATH=/z/wangcy07/pw_browsers
-export TIKTOKEN_CACHE_DIR=/z/wangcy07/tiktoken_cache
-export NLTK_DATA=/z/wangcy07/nltk_data
-export OPENAI_API_BASE=http://127.0.0.1:11434/v1
-export OPENAI_API_KEY=ollama
-export WEBARENA_EVAL_MODEL=qwen2.5:7b-instruct
+source <DATA_ROOT>/../webarena-venv/bin/activate
+cd <WEBARENA_REPO>
+export PLAYWRIGHT_BROWSERS_PATH=<DATA_ROOT>/../pw_browsers
+export TIKTOKEN_CACHE_DIR=<DATA_ROOT>/../tiktoken_cache
+export NLTK_DATA=<DATA_ROOT>/../nltk_data
 
-# Bring-up (one-shot, ~30-60 min depending on N + goldens populated)
-python -m mp.bring_up --num_workers 8 --host 158.130.4.158
+# === Materialize the live config from template (one-time) ===
+cp -n mp/configs/config-tsa.example.json mp/configs/config-tsa.json
+$EDITOR mp/configs/config-tsa.json   # fill <HOST_OR_IP>, <DATA_ROOT>, <PATH_TO_DOCKER_SOCK>
 
-# Full benchmark (5+ hours)
-python -m mp.orchestrator --start_idx 0 --end_idx 812 \
-    --provider openai --model qwen2.5:7b-instruct --mode chat \
-    --temperature 0 --top_p 0.9 --max_tokens 384 \
+# === Bring-up (one-shot, ~30-60 min depending on N + goldens populated) ===
+python -m mp.bring_up --num_workers 5 --skip_goldens
+
+# === LLM backend ===
+# Two paths — pick one. Use §8's launchers for the benchmark workflow.
+#
+# (a) TSA + SGLang via the shipped launchers (RECOMMENDED for the benchmark):
+export GPU_HOST=user@gpu-host
+bash mp/launch_tsa.sh         # or launch_dense.sh / launch_judge.sh
+source mp/.inference_env      # exports OPENAI_API_BASE etc.
+#
+# (b) Any OpenAI-compatible endpoint (Ollama, vLLM, your own) via env vars:
+export OPENAI_API_BASE=http://127.0.0.1:<PORT>/v1
+export OPENAI_API_KEY=<token-or-placeholder>
+export WEBARENA_EVAL_MODEL=<judge-model-id>
+
+# === Run the benchmark ===
+python -m mp.orchestrator \
+    --config mp/configs/config-tsa.json \
+    --start_idx 0 --end_idx 812 \
+    --provider openai --model "$AGENT_MODEL_NAME" --mode chat \
+    --inference_backend tsa \
+    --temperature 0 --top_p 1 --max_tokens 2048 \
     --max_steps 30 \
     --instruction_path agent/prompts/jsons/p_cot_id_actree_2s.json
 ```
@@ -468,8 +479,10 @@ The agent talks to **port 10000 (TSA)** or **port 10001 (dense)** via `OPENAI_AP
 |---|---|
 | `mp/_inference_common.sh` | autossh tunnel helpers, tmux helpers, `gpu_detect`, `wait_healthy`. |
 | `mp/configs/gpu_profile.sh` | Per-SM tuning table (sm_100, sm_120, fallback). |
-| `mp/configs/config-tsa.json` | MPConfig with `result_dir=…/results-tsa`. |
-| `mp/configs/config-dense.json` | MPConfig with `result_dir=…/results-dense`. |
+| `mp/configs/config-tsa.example.json` | sm_120 template (N=5). Copy to `config-tsa.json` and fill placeholders (`<HOST_OR_IP>`, `<DATA_ROOT>`, `<PATH_TO_DOCKER_SOCK>`). Live `config-tsa.json` is gitignored. |
+| `mp/configs/config-dense.example.json` | sm_120 template (N=5). Copy to `config-dense.json`. |
+| `mp/configs/config-tsa-b200.example.json` | sm_100 template (N=8). Copy to `config-tsa-b200.json`. |
+| `mp/configs/config-dense-b200.example.json` | sm_100 template (N=8). Copy to `config-dense-b200.json`. |
 | `mp/launch_judge.sh` | Boots the SGLang judge in tmux, opens tunnel :10002. |
 | `mp/launch_tsa.sh` | Boots TSA in tmux, opens tunnel :10000, ensures judge is up. |
 | `mp/launch_dense.sh` | Boots SGLang dense in tmux, opens tunnel :10001, ensures judge is up. |
@@ -482,7 +495,7 @@ The agent talks to **port 10000 (TSA)** or **port 10001 (dense)** via `OPENAI_AP
 
 | Variable | Set by | Purpose |
 |---|---|---|
-| `GPU_HOST` | user (default `wangcy07@gray.cis.upenn.edu`) | SSH target of the GPU machine. |
+| `GPU_HOST` | user (**REQUIRED — no default; launchers fail fast if unset**) | SSH target of the GPU machine, e.g. `alice@my-gpu.example.com`. |
 | `GPU_SM_HINT` | user (optional) | Override `gpu_detect` (e.g. `100` for B200). |
 | `TS_CUDA_ARCHS` | user (default `100;120`) | TSA kernel build target(s). |
 | `WEBARENA_TOKENIZER_PATH` | launcher | HF path/id for Qwen3-VL-4B tokenizer (max_obs_length accuracy). |
@@ -580,14 +593,18 @@ Both GPU classes are **first-class** targets; the connector code, launchers, and
 | **B200** | sm_100 | 141 GB | **8** (`config-tsa-b200.json` / `config-dense-b200.json`) | **16** | **ON** by default | TSA + dense + judge all coexist | reference rig, full fixed-judge rigor |
 | **RTX 5060 Ti** | sm_120 | 16 GB | **5** (`config-tsa.json` / `config-dense.json`) | **4** | OFF by default (self-judge); ON requires N ≤ 3 | sequential only | minimum target |
 
-**N=5 sm_120 evidence** (verified end-to-end in this session):
+**N=5 sm_120 evidence** (raw concurrency verified end-to-end):
 
 1. *Raw HTTP probe (5 parallel `curl POST /v1/chat/completions`)*:
     - TSA → 5/5 → `200 OK`, wall **2.05 s** (`Collected batch of 4` + `Collected batch of 1` in scheduler log).
     - Dense → 5/5 → `200 OK`, wall **0.41 s** (`max-running-requests=16` parallelises all 5).
-2. *Orchestrator level* (5 workers, 5 shopping tasks `22, 24, 47, 48, 126`):
+2. *Orchestrator level (initial pilot, pre-chat-template-fix)* — 5 workers, 5 shopping tasks `22, 24, 47, 48, 126`:
     - TSA: w0–w4 all spawned, 5/5 completed, **PASS=3 / FAIL=2 / ERROR=0**, wall 118 s, no OOM.
-    - Dense: w0–w4 all spawned, 5/5 completed, **PASS=2 / FAIL=3 / ERROR=0**, wall 104 s, no OOM.
+    - Dense: w0–w4 all spawned, 5/5 completed, **PASS=2 / FAIL=3 / ERROR=0**, wall 104 s, no OOM. (Note: these Dense "PASS=2" rows were artefactual — pre-fix every Dense trajectory step-1 crashed because of the `--chat-template qwen2-vl` issue documented in §8.8; the LLM-judge erroneously equated the crash message with the reference `"N/A"` on tasks 22+24. See `TSA_VS_DENSE_REPORT.md` §0.)
+3. *Orchestrator level (post-fix N=3 smoke, after `--chat-template qwen2-vl` removed)* — 3 workers, same 5 shopping tasks, self-judging symmetric on both backends:
+    - TSA: 5/5 trajectories reached a real `stop` answer, **PASS=3** (22, 24, **48 deterministic-correct**: `"0 fulfilled orders, $0 total spent"`), FAIL=2 (47, 126), 0 errors.
+    - Dense: 5/5 trajectories reached a real `stop` answer (no more parse-failure crashes), **PASS=2** (22, 24 — legitimate `"N/A"` answers), FAIL=3 (47, 48, 126), 0 errors.
+    - Both backends now produce correct `In summary, the next action I will perform is ```click [X]``` ` format on all trajectories — confirmed by direct curl probe + render HTML inspection.
 
 The configs ship with both defaults — pick `config-tsa.json`/`config-dense.json` (N=5, 5060 Ti) or `config-tsa-b200.json`/`config-dense-b200.json` (N=8, B200) at the orchestrator's `--config` flag. `gpu_profile.sh` auto-detects the SM from `nvidia-smi` and tunes the inference-server flags accordingly (override with `GPU_SM_HINT=100`).
 
@@ -595,6 +612,8 @@ The configs ship with both defaults — pick `config-tsa.json`/`config-dense.jso
 
 ### 8.8 Pitfalls
 
+- **CRITICAL: do NOT pass `--chat-template qwen2-vl` to SGLang when serving Qwen3-VL.** SGLang's bundled `qwen2-vl` template was designed for the older Qwen2-VL series — it injects `<|vision_start|><|image_pad|><|vision_end|>` vision-pad tokens and uses Qwen2-era system-marker wrapping. Qwen3-VL was not trained with this template (its native template lives in `tokenizer_config.json`). Forcing the wrong template corrupts the prompt structure, the few-shot agent examples lose their format anchor, and the model falls back to memorized SeeAct-style `` ```action [X]``` `` syntax which WebArena's action parser rejects → every Dense trajectory step-1 crashes with `Early stop: Failed to parse actions for 3 times`. **Fix**: omit `--chat-template`; SGLang then reads the model's native ChatML template from `tokenizer_config.json` — the same path TSA already uses via `processor.apply_chat_template()` in `TreeSparseAttention_CW/models/qwen3vl_inference.py`. This restores input parity (no tailoring; both backends now apply the template the model was trained with). The shipped `mp/launch_dense.sh` and `mp/launch_judge.sh` have this corrected; do not re-add the flag. See `TSA_VS_DENSE_REPORT.md` §0 for the full diagnosis.
+- **xgrammar is not the answer to the format issue above.** xgrammar exists in both SGLang and TSA but is opt-in per request (requires `response_format` / `regex` / `guided_json` in the request body). WebArena's openai client sends plain `chat.completions.create(messages=..., ...)` with no schema, so neither backend uses xgrammar during the agent run — output format compliance has to come entirely from correct chat templating (above).
 - **VRAM ceiling (sm_120 / 5060 Ti)** — TSA(4B) + SGLang-judge(2B) coexist at ~13.5 GB total at `TSA_MAX_BATCH=2`. At `TSA_MAX_BATCH=4` (needed to actually parallelise N=5 batched on the TSA scheduler), the judge no longer fits — drop the judge or drop N. SGLang-dense(4B) + SGLang-judge(2B) does not coexist on a 16 GB card because two SGLang servers fragment too aggressively to share the remaining 6 GB. The smoke-test setup confirmed empirically:
   - TSA(4B) + Judge(2B) at mem-frac 0.35 → fits; 15.1 GB used.
   - Dense(4B) alone at mem-frac 0.60 → fits; 10.4 GB used.

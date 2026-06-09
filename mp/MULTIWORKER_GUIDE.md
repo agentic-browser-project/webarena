@@ -230,6 +230,11 @@ LLM throughput is often the bottleneck — if you use a single shared Ollama on 
 * **Puma worker count**: Omnibus auto-detects `worker_processes` from CPU count, which on a many-core box means each replica spawns ~128 puma workers. With N replicas this OOM-kills puma on multiple replicas. `configure_replica_gitlab` caps `puma['worker_processes'] = 4` per replica. If you change this, expect to retune `--max_steps` or reset timeouts.
 * **`nginx['listen_port']`**: setting `external_url` to `http://host:N` makes nginx listen on port N *inside* the container. Our docker port mapping is `host:N → container:8023`, so nginx must keep listening on 8023. `configure_replica_gitlab` pins it.
 * **External-URL 502 vs Playwright 200**: GitLab nginx returns 502 to bare `curl http://127.0.0.1:8123/users/sign_in` (Host header mismatch with `external_url`) but Playwright + real browser see HTTP 200 with a fully-rendered page. `mp.reset._wait_healthy` accepts by `expect_body_contains` rather than strict status code, so this doesn't fail the harness.
+* **Persistent 502 + ulimit warnings in `docker logs`**: if a gitlab replica returns HTTP 502 on ALL paths (not just root) and `docker logs` shows `ulimit: max user processes: cannot modify limit` / `/proc/sys/fs/file-max: Read-only file system`, ignore the ulimit lines (they are harmless rootless-docker noise emitted by every gitlab container at startup). The real signal is whether puma is up:
+  ```bash
+  docker exec gitlab_wN gitlab-ctl status puma   # look for "run:" vs "down:"
+  ```
+  If puma is `down`, restart it in place: `docker exec gitlab_wN gitlab-ctl start puma`. Wait ~2.5 minutes for the Rails preload to complete (`tail -f /var/log/gitlab/puma/current` until you see `* Listening on http://127.0.0.1:8080`). Observed root cause: puma can die on long-running idle containers (memory pressure / OOM-killer); runit's auto-restart can fail to come back if the container has been idle for many days. In-place restart is faster and preserves repository state vs recreating from golden image.
 
 ### 4.4 Magento specifics
 

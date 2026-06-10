@@ -115,7 +115,45 @@ WebArena-side changes are **additive** — if `WEBARENA_EVAL_API_BASE` is unset,
 
 ## 5. One-time setup
 
-On the GPU host (`gray` or a B200 box):
+### 5.0 Joining a pre-provisioned shared deployment
+
+If your team already runs a multi-worker host (one operator brought up the docker replicas + Python venv + golden snapshots + opened the rootless docker socket to the host's `other` permission class), you do **not** need to repeat §5.1–§5.3. Any user with an account on that host can run the benchmark by exporting four env vars:
+
+```bash
+# 1. Point at the shared rootless docker socket the operator opened
+export DOCKER_HOST=unix://<DATA_ROOT>/rootless-docker/run/docker.sock
+
+# 2. Use the shared venv (skip if you have your own)
+export PATH=<SHARED_VENV>/bin:$PATH
+
+# 3. Point at the GPU host (your own SSH key must be in its authorized_keys)
+export GPU_HOST=user@gpu-host.example.com
+
+# Sanity check: should list the per-worker docker replicas
+docker ps --format '{{.Names}}' | head -5
+```
+
+Then copy the operator's config and redirect `result_dir` + `auth_root` to your own home (so you don't overwrite their results or fight for cookies):
+
+```bash
+cp <SHARED_REPO>/mp/configs/config-tsa.json ~/my-config.json
+sed -i "s|\"result_dir\".*|\"result_dir\": \"$HOME/wa-results\",|" ~/my-config.json
+sed -i "s|\"auth_root\".*|\"auth_root\": \"$HOME/wa-auth\",|"   ~/my-config.json
+mkdir -p $HOME/wa-results $HOME/wa-auth
+
+cd <SHARED_REPO>
+bash mp/launch_tsa.sh        # boots TSA + judge on $GPU_HOST, opens tunnels
+source mp/.inference_env
+python -m mp.orchestrator --config ~/my-config.json --task_ids "22,24,47,48,126"
+```
+
+Multi-user coordination: if other people on the same host run at the same time, partition `num_workers` (e.g. you take w0–w2, they take w3–w4) by editing `num_workers` in your private config so neither side resets the other's containers mid-task. Read-only sites (`wikipedia`, `map`, `homepage`) are safe to share without coordination.
+
+### 5.1 Provisioning a fresh deployment
+
+If you ARE the operator bringing up a new multi-worker host, follow §5.2 (GPU host) and §5.3 (orchestrator host) below.
+
+### 5.2 On the GPU host:
 
 ```bash
 # 1. Model weights (~8 GB)
@@ -133,7 +171,7 @@ TS_CUDA_ARCHS="100;120" python -c \
 pip install 'sglang[all]>=0.4.3' 'flashinfer-python>=0.2'  # Triton fallback OK on sm_120
 ```
 
-On the orchestrator host:
+### 5.3 On the orchestrator host:
 
 ```bash
 cd <WEBARENA_REPO>
@@ -149,6 +187,32 @@ export GPU_HOST=user@gpu-host.example.com
 # 3. Provision per-worker docker replicas
 python -m mp.bring_up --num_workers 5 --skip_goldens
 ```
+
+### 5.4 Opening the deployment to the whole team (optional)
+
+Rootless docker stores its socket under the operator's home directory with `srw------- owner` by default. To let any other user on the same host run the benchmark without sharing SSH credentials, open the socket + supporting paths once:
+
+```bash
+# As the operator (no sudo required — these are your own files)
+
+# 1. Socket: world-readable+writable (anyone on this host can drive docker as you)
+chmod o+x  $HOME $HOME/webarena $HOME/webarena/rootless-docker $HOME/webarena/rootless-docker/run
+chmod o+rw $HOME/webarena/rootless-docker/run/docker.sock
+
+# 2. Code + golden snapshots + venv (read-only for everyone)
+chmod -R o+rX <WEBARENA_REPO>
+chmod -R o+rX <DATA_ROOT>/golden <DATA_ROOT>/config_files
+chmod -R o+rX <SHARED_VENV>
+
+# 3. Optional: protect anything sensitive you DON'T want exposed
+chmod 700 $HOME/.ssh $HOME/.config 2>/dev/null || true
+```
+
+**Security note**: opening the rootless docker socket grants anyone on this host the ability to execute arbitrary code as your UID inside containers, including mounting any directory you can read. The blast radius stays within your UID's permissions (it's rootless), but everything you own becomes effectively accessible. Only do this on a trusted machine. Other users still need their own SSH key in `$GPU_HOST`'s `authorized_keys` to actually drive the GPU server — opening the docker socket alone does not grant GPU access.
+
+After running the commands above, anyone on the host follows §5.0 to join.
+
+---
 
 Deeper setup detail is in [`mp/TSA_VS_DENSE_RUNBOOK.md`](mp/TSA_VS_DENSE_RUNBOOK.md) §2.
 

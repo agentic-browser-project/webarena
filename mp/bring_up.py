@@ -315,6 +315,30 @@ def configure_replica_gitlab(
 # Golden artifact population
 # ---------------------------------------------------------------------------
 
+def _verify_mysqldump(path: str) -> None:
+    """Sanity-check a mysqldump output: catch a real docker-stream bug.
+
+    Observed on hilbit2: ``docker exec ... mysqldump ... > file`` very
+    occasionally produces output where two version-conditional comments get
+    concatenated mid-line, e.g. ``/*!401/*!40000 ALTER TABLE`` instead of two
+    separate ``/*!40101 SET ... */; /*!40000 ALTER TABLE ... */;`` lines.
+    The corruption is intermittent and only surfaces at restore time when
+    mariadb refuses to parse the malformed comment with ``ERROR 1064``.
+    Catch it at dump time instead.
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    if not data.endswith(b"\n"):
+        raise RuntimeError(f"{path}: dump truncated (no trailing newline)")
+    # The pattern is a `!` followed by digits then `/`, which never appears in
+    # a clean mysqldump (version conditionals end with `*/`).
+    if re.search(rb"/\*!\d+/\*!\d", data):
+        raise RuntimeError(
+            f"{path}: malformed concatenated version comment detected "
+            f"(docker-stream interleaving bug — re-run populate_goldens)"
+        )
+
+
 def populate_goldens(client: DockerClient, cfg: MPConfig) -> None:
     """For w=0 only, dump golden artifacts into ``cfg.golden_root``."""
     # Shopping
@@ -324,13 +348,23 @@ def populate_goldens(client: DockerClient, cfg: MPConfig) -> None:
         log.info("dumping %s -> %s", site, out)
         # mysqldump --add-drop-table emits DROP TABLE IF EXISTS for every table.
         # --no-tablespaces is required on MariaDB ≥ 10.5 without PROCESS privilege.
-        client.run(
-            f"docker exec {shlex.quote(container)} mysqldump "
-            f"--single-transaction --routines --triggers --add-drop-table "
-            f"--no-tablespaces -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} "
-            f"{MAGENTO_DB_NAME} > {shlex.quote(out)}",
-            timeout=900,
-        )
+        # Retry on dump corruption (docker-stream interleaving — see
+        # _verify_mysqldump). 3 attempts; we typically succeed on the first.
+        for attempt in range(3):
+            client.run(
+                f"docker exec {shlex.quote(container)} mysqldump "
+                f"--single-transaction --routines --triggers --add-drop-table "
+                f"--no-tablespaces -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} "
+                f"{MAGENTO_DB_NAME} > {shlex.quote(out)}",
+                timeout=900,
+            )
+            try:
+                _verify_mysqldump(out)
+                break
+            except RuntimeError as e:
+                if attempt == 2:
+                    raise
+                log.warning("dump verify failed (attempt %d/3): %s", attempt + 1, e)
 
     # Reddit / Postmill
     out = cfg.golden_sql_path("reddit")

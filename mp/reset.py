@@ -134,12 +134,16 @@ def reset_magento(
     # 1. Restore DB tables. The golden SQL uses --add-drop-table so DROP/CREATE
     #    happen at the table level (magentouser has no global CREATE DATABASE
     #    privilege, per §14.1).
+    # 60 min budget: a fresh-restore of the 1.9 GB shopping golden into a cold
+    # mariadb (rebuilds indexes + foreign keys, single-threaded import) takes
+    # 20-40 min on the reference deployment, and shopping_admin's smaller
+    # 7 MB dump finishes in <1 min — 60 min covers both with margin.
     client.run(
         f"cat {shlex.quote(golden_sql_path_on_target)} | "
         f"docker exec -i {shlex.quote(container)} "
         f"mysql --max_allowed_packet=512M "
         f"-u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} {MAGENTO_DB_NAME}",
-        timeout=1800,
+        timeout=3600,
     )
 
     # 2. Clear Magento filesystem caches/sessions. Magento writes these in
@@ -238,12 +242,14 @@ def reset_postmill(
     #    custom format (``pg_dump -Fc``); ``--clean --if-exists`` emits
     #    ``DROP TABLE IF EXISTS`` before each ``CREATE TABLE``, avoiding the
     #    need for global DROP DATABASE privilege.
+    # 20 min budget: postmill golden is ~478 MB pg_dump custom format which
+    # decompresses + index-builds in 3-8 min on hilbit2's reference deployment.
     client.run(
         f"cat {shlex.quote(golden_dump_path_on_target)} | "
         f"docker exec -i {shlex.quote(container)} "
         f"pg_restore -U {POSTMILL_DB_USER} -d {POSTMILL_DB_NAME} "
         f"--clean --if-exists --no-owner --no-acl",
-        timeout=180,
+        timeout=1200,
         check=False,  # pg_restore emits warnings for missing objects on first restore; not fatal
     )
 
@@ -255,17 +261,19 @@ def reset_postmill(
     #    cache. Both directories exist on the source image
     #    (verified, §14.2) and tasks like "submit a post with image" rely on
     #    them being part of golden state.
+    # 30 min budget: submission_images.tar can be many GB if tasks have been
+    # uploading; bounded by tar extract throughput.
     client.run(
         f"cat {shlex.quote(submission_images_tar_on_target)} | "
         f"docker exec -i {shlex.quote(container)} bash -lc "
         f"{shlex.quote('rm -rf /var/www/html/public/submission_images/* && tar -C /var/www/html/public/submission_images -xf -')}",
-        timeout=120,
+        timeout=1800,
     )
     client.run(
         f"cat {shlex.quote(media_cache_tar_on_target)} | "
         f"docker exec -i {shlex.quote(container)} bash -lc "
         f"{shlex.quote('rm -rf /var/www/html/public/media/cache/* && tar -C /var/www/html/public/media/cache -xf -')}",
-        timeout=120,
+        timeout=600,
     )
 
     # 5. Wait for the frontend. Postmill has no auth-required home page;
@@ -316,10 +324,14 @@ def reset_gitlab(
         "for i in $(seq 1 60); do pgrep -f 'sidekiq .*production' >/dev/null 2>&1 || break; sleep 1; done",
         timeout=90,
     )
+    # 60 min budget: the gitlab golden is ~23 GB on the reference deployment
+    # (postgresql + redis + git-data + uploads). rsync with --delete is bounded
+    # by the slower of disk-write and inode-update throughput; observed wall-
+    # clock for a clean reset is 8-20 min on hilbit2.
     client.exec(
         container,
         f"rsync -a --delete {shlex.quote(golden_dir_in_container)}/ /var/opt/gitlab/",
-        timeout=600,
+        timeout=3600,
     )
     client.exec(
         container,

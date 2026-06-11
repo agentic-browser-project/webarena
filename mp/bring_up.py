@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import shlex
 import sys
 import time
@@ -173,7 +174,16 @@ def configure_replica_magento(
         # storefront URL but accept any HTTP response (Magento often serves
         # 500 with a wrong base_url before we fix it). Each probe has both a
         # curl --max-time AND a subprocess timeout so we can't hang.
+        #
+        # ALSO probe the in-container MySQL: the storefront can answer HTTP
+        # before mariadb is ready, and the next step here calls `mysql -e ...`
+        # which would fail. Both must be green to break.
         deadline = time.monotonic() + 240
+        # Real HTTP codes are 3 digits 100-599. The `|| echo 000` curl fallback
+        # plus curl's own "%{http_code}" output of "000" on timeout can
+        # concatenate into "000000", so use a strict regex match — anything
+        # not in [1-5][0-9][0-9] means "not really booted yet".
+        http_re = re.compile(rb"^[1-5]\d{2}$")
         while time.monotonic() < deadline:
             r = client.exec(
                 container,
@@ -182,8 +192,26 @@ def configure_replica_magento(
                 timeout=30,
             )
             code = r.stdout.strip()
-            if r.returncode == 0 and code not in (b"", b"000"):
-                log.info("%s booted (HTTP %s)", container, code.decode("ascii", "replace"))
+            if r.returncode != 0 or not http_re.match(code):
+                time.sleep(3)
+                continue
+            # HTTP is up; now confirm mariadb is reachable before declaring
+            # boot complete — the very next CLI call in this function is
+            # `mysql -e UPDATE core_config_data ...` and that fails if the
+            # in-container MySQL socket isn't listening yet.
+            mysql_check = client.exec(
+                container,
+                f"mysql -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} "
+                f"{MAGENTO_DB_NAME} -BNe 'SELECT 1' 2>/dev/null",
+                check=False,
+                timeout=30,
+            )
+            if mysql_check.returncode == 0 and mysql_check.stdout.strip() == b"1":
+                log.info(
+                    "%s booted (HTTP %s, mysql ready)",
+                    container,
+                    code.decode("ascii", "replace"),
+                )
                 break
             time.sleep(3)
 

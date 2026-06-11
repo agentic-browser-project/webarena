@@ -236,9 +236,23 @@ LLM throughput is often the bottleneck — if you use a single shared Ollama on 
   ```
   If puma is `down`, restart it in place: `docker exec gitlab_wN gitlab-ctl start puma`. Wait ~2.5 minutes for the Rails preload to complete (`tail -f /var/log/gitlab/puma/current` until you see `* Listening on http://127.0.0.1:8080`). Observed root cause: puma can die on long-running idle containers (memory pressure / OOM-killer); runit's auto-restart can fail to come back if the container has been idle for many days. In-place restart is faster and preserves repository state vs recreating from golden image.
 
+### 4.3a Fast reset — physical datadir swap (default)
+
+**Root cause of slow resets**: this deployment's docker data-root is on a ZFS pool with no SLOG device, so every `fsync` costs ~110 ms (measured: 100 fsync'd 4 KB writes = 11.3 s on the host pool). A logical restore — `cat golden.sql | mysql` or `pg_restore` — is fsync-bound: it commits thousands of statements while rebuilding 369 Magento tables and their indexes, so it costs thousands × 110 ms and runs for **tens of minutes to hours**. Recreating the container from the golden image is *worse* for Magento because it re-triggers a heavy cold app boot.
+
+**Fix**: `mp/reset.py` defaults to a **physical datadir swap**. At bring-up, after each replica's per-worker base_url is configured, `snapshot_all_datadirs()` makes a pristine on-container copy of the DB data directory (`/var/lib/mysql.golden` for Magento, `/usr/local/pgsql/data.golden` for Postmill). Reset then: stops the DB via supervisor → `cp -a` the golden tree back over the live datadir → starts the DB → clears caches → in-container HTTP/DB health probe. This is a bulk sequential copy that skips every per-commit fsync and index rebuild.
+
+Measured on hilbit2 (`shopping_admin`): **logical restore 2+ hours → physical swap ~85 s end-to-end** (the pure datadir swap is ~24 s; the rest is cache-clear + storefront warmup to first 302). The swap also resets filesystem drift (sessions, generated code) that a DB-only restore would miss — strictly more rigorous.
+
+Operational notes:
+* The golden datadir snapshot lives in the container's writable layer, so it is **lost if the container is recreated** (manual `docker rm` + `docker run`). Re-create it by re-running `mp.bring_up` (idempotent) or calling `snapshot_all_datadirs(client, cfg)` directly.
+* If the snapshot is absent, `reset_magento` / `reset_postmill` automatically **fall back to the logical restore** (slow but correct), now with relaxed durability (`innodb_flush_log_at_trx_commit=2`; postgres `synchronous_commit=off`) to cut fsync cost.
+* GitLab is unchanged: its reset already does a physical rsync from the host-side golden tree (`reset_gitlab`).
+* `reset_site(..., strategy="recreate")` remains available for when a container is unrecoverable, but is NOT the default — it pays the heavy Magento cold-boot.
+
 ### 4.4 Magento specifics
 
-* **Reset privilege**: the Magento `magentouser` only has DB-level privileges on `magentodb`. Reset uses `mysqldump --add-drop-table` so DROP/CREATE happen at the TABLE level (the user has those), not at the DATABASE level (which it doesn't).
+* **Reset privilege**: the Magento `magentouser` only has DB-level privileges on `magentodb`. The *logical* fallback restore uses `mysqldump --add-drop-table` so DROP/CREATE happen at the TABLE level (the user has those), not at the DATABASE level (which it doesn't). The default *physical-swap* path (§4.3a) sidesteps SQL entirely.
 * **Redis flush is mandatory**: env.php configures Magento's `default` and `page_cache` backends to use Redis. After every DB restore, `redis-cli -n 0 FLUSHDB; redis-cli -n 1 FLUSHDB` is required, otherwise the storefront serves stale full-page cache. `reset_magento` does this.
 * **Base URL rewrite is per-reset, not per-bring-up**: restoring the golden SQL overwrites `core_config_data.web/secure/base_url` back to whatever the original storefront port was. After every restore we re-run `setup:store-config:set --base-url=<worker's URL>` plus a direct SQL `UPDATE core_config_data`.
 * **MySQL readiness lags HTTP readiness by 30–60 s on first boot.** A fresh Magento container responds to `curl http://127.0.0.1/` (HTTP 302 or 500) before its in-container MariaDB accepts connections. If you write your own bring-up wrappers, poll `mysql --connect-timeout=5 -u magentouser -p... -e 'SELECT 1' magentodb` and accept that the first few probes will fail or time out (use per-probe `timeout=60`, total deadline ≥ 300 s).
@@ -247,8 +261,9 @@ LLM throughput is often the bottleneck — if you use a single shared Ollama on 
 ### 4.5 Postmill specifics
 
 * DB user `postmill` has CREATE/DROP on its own database; no `su - postgres` needed.
-* Reset uses `pg_restore --clean --if-exists` (DROP TABLE IF EXISTS before each restore).
-* User-uploaded `submission_images/` and generated `media/cache/` are part of state — restored from tarballs in `<golden_root>/reddit/`.
+* Default reset is the physical datadir swap (§4.3a). The logical fallback uses `pg_restore --clean --if-exists` (DROP TABLE IF EXISTS before each restore) with `synchronous_commit=off`.
+* User-uploaded `submission_images/` and generated `media/cache/` are part of state — restored from tarballs in `<golden_root>/reddit/` on both reset paths.
+* **Golden image WAL recovery**: the reddit golden image was committed while postgres was running (crash-consistent), so a freshly-recreated reddit container replays WAL on boot, which can take 5–20 min on this storage. The physical-swap reset avoids container recreation, so it does not pay this cost; but a one-time clean `pg_ctl stop` + image re-commit would make the `strategy="recreate"` path fast too.
 
 ### 4.6 Read-only site sharing
 

@@ -66,6 +66,19 @@ MAGENTO_DB_NAME = "magentodb"
 POSTMILL_DB_USER = "postmill"
 POSTMILL_DB_NAME = "postmill"
 
+# In-container DB data directories + the supervisor program that runs each DB.
+# Used by the physical-datadir-swap reset (mp/reset.py): a bulk file copy of
+# the data directory is ~100x faster than a logical SQL/dump replay on
+# slow-fsync storage (ZFS without SLOG ≈ 113 ms/fsync on hilbit2), because it
+# skips the thousands of per-commit fsyncs + index rebuilds a logical restore
+# incurs. ``<datadir>.golden`` is a pristine copy made at bring-up time, after
+# the per-worker base_url has been configured, so the swap needs no re-config.
+MAGENTO_MYSQL_DATADIR = "/var/lib/mysql"
+MAGENTO_MYSQL_SUPERVISOR_PROG = "mysqld"
+POSTMILL_PG_DATADIR = "/usr/local/pgsql/data"
+POSTMILL_PG_SUPERVISOR_PROG = "postgres"
+GOLDEN_DATADIR_SUFFIX = ".golden"
+
 # Default account creds (mirrors browser_env/env_config.py:ACCOUNTS but here for
 # bring-up-time admin operations on Magento via REST and CLI).
 MAGENTO_ADMIN_USER = "admin"

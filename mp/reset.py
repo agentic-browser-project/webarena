@@ -23,17 +23,23 @@ returns 200, with a timeout that escalates per-site (Magento: 90 s; Postmill:
 """
 from __future__ import annotations
 
+import re
 import shlex
 import time
 import urllib.error
 import urllib.request
 
 from mp.config import (
+    GOLDEN_DATADIR_SUFFIX,
     MAGENTO_DB_NAME,
     MAGENTO_DB_PASSWORD,
     MAGENTO_DB_USER,
+    MAGENTO_MYSQL_DATADIR,
+    MAGENTO_MYSQL_SUPERVISOR_PROG,
     POSTMILL_DB_NAME,
     POSTMILL_DB_USER,
+    POSTMILL_PG_DATADIR,
+    POSTMILL_PG_SUPERVISOR_PROG,
     MPConfig,
 )
 from mp.docker_exec import DockerClient, DockerExecError
@@ -41,6 +47,136 @@ from mp.docker_exec import DockerClient, DockerExecError
 
 class ResetFailed(RuntimeError):
     """Raised when a reset primitive cannot restore golden state."""
+
+
+# ---------------------------------------------------------------------------
+# Physical datadir swap (fast reset)
+#
+# A logical restore (cat golden.sql | mysql, or pg_restore) is fsync-bound:
+# every commit forces a redo-log fsync, and on slow-fsync storage (ZFS without
+# a SLOG device — ~113 ms/fsync on hilbit2) a 369-table Magento restore takes
+# tens of minutes to hours, and a freshly-recreated container additionally
+# pays a heavy DB+app cold boot. A *physical* datadir swap — stop the DB, copy
+# a pristine on-container ``<datadir>.golden`` back over the live datadir,
+# start the DB — is a bulk sequential file copy that bypasses all per-commit
+# fsyncs and index rebuilds. Measured on hilbit2: shopping_admin reset went
+# from 2+ hours (logical) to ~24 s (physical swap).
+# ---------------------------------------------------------------------------
+
+def _golden_datadir_exists(client: DockerClient, container: str, datadir: str) -> bool:
+    golden = datadir + GOLDEN_DATADIR_SUFFIX
+    r = client.exec(
+        container,
+        f"test -d {shlex.quote(golden)} && test -n \"$(ls -A {shlex.quote(golden)} 2>/dev/null)\" "
+        f"&& echo YES || echo NO",
+        check=False,
+        timeout=30,
+    )
+    return r.stdout.strip().endswith(b"YES")
+
+
+def snapshot_datadir(
+    client: DockerClient,
+    container: str,
+    *,
+    datadir: str,
+    supervisor_prog: str,
+) -> None:
+    """Create the pristine ``<datadir>.golden`` snapshot used by the fast reset.
+
+    Call this once per replica at bring-up, AFTER the DB is in golden state
+    and (for Magento) the per-worker base_url has been written — so the
+    snapshot already carries this worker's correct config and the swap needs
+    no post-restore reconfiguration.
+
+    Stops the DB via supervisor for a consistent on-disk copy, snapshots, then
+    restarts it.
+    """
+    golden = datadir + GOLDEN_DATADIR_SUFFIX
+    client.exec(container, f"supervisorctl stop {supervisor_prog}", timeout=120)
+    # Brief settle so the DB has fully released its files before we copy.
+    time.sleep(3)
+    client.exec(
+        container,
+        f"rm -rf {shlex.quote(golden)} && cp -a {shlex.quote(datadir)} {shlex.quote(golden)}",
+        timeout=1800,
+    )
+    client.exec(container, f"supervisorctl start {supervisor_prog}", timeout=120)
+
+
+def _wait_container_db_and_http(
+    client: DockerClient,
+    container: str,
+    *,
+    mysql_check: bool = False,
+    pg_check: bool = False,
+    timeout_seconds: float = 300,
+) -> None:
+    """Wait until the container's own DB + nginx are serving, probed from INSIDE.
+
+    Probing from inside the container (``docker exec ... curl 127.0.0.1``)
+    rather than the external base_url avoids host-side DNS/interface/proxy
+    ambiguity — the same pattern bring_up's configure step uses. "Healthy"
+    means: the DB answers a trivial query AND the local web server returns any
+    real HTTP status below 500 (Magento /admin legitimately 302-redirects to
+    the login page; postmill returns 200).
+    """
+    http_re = re.compile(rb"^[1-4]\d{2}$")
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        db_ok = True
+        if mysql_check:
+            r = client.exec(
+                container,
+                f"mysql -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} "
+                f"{MAGENTO_DB_NAME} -BNe 'SELECT 1' 2>/dev/null",
+                check=False, timeout=30,
+            )
+            db_ok = r.returncode == 0 and r.stdout.strip() == b"1"
+        if pg_check:
+            r = client.exec(
+                container,
+                f"psql -U {POSTMILL_DB_USER} -d {POSTMILL_DB_NAME} -tAc 'SELECT 1' 2>/dev/null",
+                check=False, timeout=30,
+            )
+            db_ok = r.returncode == 0 and r.stdout.strip() == b"1"
+        if db_ok:
+            h = client.exec(
+                container,
+                "curl -s -o /dev/null --max-time 5 -w '%{http_code}' http://127.0.0.1/ 2>/dev/null || echo 000",
+                check=False, timeout=30,
+            )
+            if http_re.match(h.stdout.strip()):
+                return
+        time.sleep(2)
+    raise ResetFailed(
+        f"{container}: DB/HTTP did not become healthy within {timeout_seconds:.0f}s"
+    )
+
+
+def _physical_swap_datadir(
+    client: DockerClient,
+    container: str,
+    *,
+    datadir: str,
+    supervisor_prog: str,
+) -> None:
+    """Stop DB → restore datadir from ``<datadir>.golden`` → start DB.
+
+    Caller must have verified the golden snapshot exists.
+    """
+    golden = datadir + GOLDEN_DATADIR_SUFFIX
+    client.exec(container, f"supervisorctl stop {supervisor_prog}", timeout=120)
+    time.sleep(2)
+    # rm the live datadir contents (dotfiles included) then copy the golden
+    # tree back. `cp -a golden/. datadir/` preserves perms/owner/timestamps.
+    client.exec(
+        container,
+        f"rm -rf {shlex.quote(datadir)}/* {shlex.quote(datadir)}/.[!.]* 2>/dev/null; "
+        f"cp -a {shlex.quote(golden)}/. {shlex.quote(datadir)}/",
+        timeout=1800,
+    )
+    client.exec(container, f"supervisorctl start {supervisor_prog}", timeout=120)
 
 
 # ---------------------------------------------------------------------------
@@ -131,20 +267,81 @@ def reset_magento(
     this replica. Magento's ``core_config_data`` is rewritten to this URL
     after the restore so that pages render with correct asset URLs.
     """
+    # FAST PATH: if a pristine on-container datadir snapshot exists (made at
+    # bring-up after this worker's base_url was configured), swap it back —
+    # ~24 s vs 2+ hours for the logical restore below. The snapshot already
+    # carries the correct per-worker base_url, so steps 2-5 (cache flush, URL
+    # rewrite) are unnecessary and we go straight to the health wait.
+    if _golden_datadir_exists(client, container, MAGENTO_MYSQL_DATADIR):
+        _physical_swap_datadir(
+            client,
+            container,
+            datadir=MAGENTO_MYSQL_DATADIR,
+            supervisor_prog=MAGENTO_MYSQL_SUPERVISOR_PROG,
+        )
+        # Filesystem caches/sessions may reference pre-reset entity IDs; clear
+        # them, flush Redis, and wait for the storefront.
+        client.exec(
+            container,
+            "cd /var/www/magento2 && "
+            "rm -rf var/cache/* var/page_cache/* var/session/* var/tmp/* "
+            "var/view_preprocessed/* var/log/* generated/code/* generated/metadata/* || true",
+            timeout=600,
+        )
+        client.exec(
+            container,
+            "redis-cli -n 0 FLUSHDB; redis-cli -n 1 FLUSHDB",
+            timeout=15,
+            check=False,
+        )
+        _wait_container_db_and_http(
+            client, container, mysql_check=True, timeout_seconds=300
+        )
+        return
+
+    # SLOW PATH (no snapshot present): logical restore.
     # 1. Restore DB tables. The golden SQL uses --add-drop-table so DROP/CREATE
     #    happen at the table level (magentouser has no global CREATE DATABASE
     #    privilege, per §14.1).
-    # 60 min budget: a fresh-restore of the 1.9 GB shopping golden into a cold
-    # mariadb (rebuilds indexes + foreign keys, single-threaded import) takes
-    # 20-40 min on the reference deployment, and shopping_admin's smaller
-    # 7 MB dump finishes in <1 min — 60 min covers both with margin.
-    client.run(
-        f"cat {shlex.quote(golden_sql_path_on_target)} | "
-        f"docker exec -i {shlex.quote(container)} "
-        f"mysql --max_allowed_packet=512M "
-        f"-u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} {MAGENTO_DB_NAME}",
-        timeout=3600,
+    #
+    # Durability is relaxed for the duration of the restore: on hosts where
+    # fsync is slow (ZFS without SLOG ≈ 100 ms/fsync on hilbit2), the default
+    # innodb_flush_log_at_trx_commit=1 costs one fsync per commit and the
+    # restore takes hours. During a golden restore durability buys nothing —
+    # if the restore crashes we just run it again — so flush once per second
+    # instead (=2). Restored to full durability afterwards. SET GLOBAL needs
+    # SUPER; try root first, magentouser second, and proceed regardless (the
+    # restore is then merely slow, not wrong).
+    _relax = "SET GLOBAL innodb_flush_log_at_trx_commit=2;"
+    client.exec(
+        container,
+        f"mysql -uroot -p1234567890 -e {shlex.quote(_relax)} 2>/dev/null || "
+        f"mysql -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} -e {shlex.quote(_relax)} || true",
+        timeout=30,
+        check=False,
     )
+    try:
+        # FK/unique checks off for the stream: the dump is self-consistent.
+        # 60 min budget: a fresh-restore of the 1.9 GB shopping golden into a
+        # cold mariadb (single-threaded import) takes 20-40 min on the
+        # reference deployment; shopping_admin's 7 MB dump finishes in ~2 min.
+        client.run(
+            f"(echo 'SET SESSION foreign_key_checks=0; SET SESSION unique_checks=0;'; "
+            f"cat {shlex.quote(golden_sql_path_on_target)}) | "
+            f"docker exec -i {shlex.quote(container)} "
+            f"mysql --max_allowed_packet=512M "
+            f"-u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} {MAGENTO_DB_NAME}",
+            timeout=3600,
+        )
+    finally:
+        _restore = "SET GLOBAL innodb_flush_log_at_trx_commit=1;"
+        client.exec(
+            container,
+            f"mysql -uroot -p1234567890 -e {shlex.quote(_restore)} 2>/dev/null || "
+            f"mysql -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} -e {shlex.quote(_restore)} || true",
+            timeout=30,
+            check=False,
+        )
 
     # 2. Clear Magento filesystem caches/sessions. Magento writes these in
     #    /var/www/magento2/var; clearing them is mandatory because they refer
@@ -226,6 +423,38 @@ def reset_postmill(
     health_url: str,
 ) -> None:
     """Restore a Postmill container to its golden state."""
+    # FAST PATH: physical datadir swap when the on-container snapshot exists.
+    # The DB is the only mutable state tasks touch on Postmill; submission
+    # images + media cache are restored from tar regardless (cheap when the
+    # set is small; idempotent). See _physical_swap_datadir for the rationale.
+    if _golden_datadir_exists(client, container, POSTMILL_PG_DATADIR):
+        _physical_swap_datadir(
+            client,
+            container,
+            datadir=POSTMILL_PG_DATADIR,
+            supervisor_prog=POSTMILL_PG_SUPERVISOR_PROG,
+        )
+        client.exec(container, "rm -rf /var/www/html/var/cache/*", timeout=180, check=False)
+        client.run(
+            f"cat {shlex.quote(submission_images_tar_on_target)} | "
+            f"docker exec -i {shlex.quote(container)} bash -lc "
+            f"{shlex.quote('rm -rf /var/www/html/public/submission_images/* && tar -C /var/www/html/public/submission_images -xf -')}",
+            timeout=1800,
+            check=False,
+        )
+        client.run(
+            f"cat {shlex.quote(media_cache_tar_on_target)} | "
+            f"docker exec -i {shlex.quote(container)} bash -lc "
+            f"{shlex.quote('rm -rf /var/www/html/public/media/cache/* && tar -C /var/www/html/public/media/cache -xf -')}",
+            timeout=600,
+            check=False,
+        )
+        _wait_container_db_and_http(
+            client, container, pg_check=True, timeout_seconds=300
+        )
+        return
+
+    # SLOW PATH (no snapshot present): logical pg_restore.
     # 1. Terminate any open connections to the postmill DB so DROP TABLE
     #    statements inside pg_restore --clean can proceed.
     terminate_sql = (
@@ -244,9 +473,13 @@ def reset_postmill(
     #    need for global DROP DATABASE privilege.
     # 20 min budget: postmill golden is ~478 MB pg_dump custom format which
     # decompresses + index-builds in 3-8 min on hilbit2's reference deployment.
+    # synchronous_commit=off for the restore session: skips the per-commit
+    # WAL fsync (~100 ms each on slow-fsync hosts like hilbit2's ZFS pool)
+    # without disabling fsync entirely — a crash mid-restore loses only the
+    # restore itself, which we'd re-run anyway.
     client.run(
         f"cat {shlex.quote(golden_dump_path_on_target)} | "
-        f"docker exec -i {shlex.quote(container)} "
+        f"docker exec -i -e PGOPTIONS='-c synchronous_commit=off' {shlex.quote(container)} "
         f"pg_restore -U {POSTMILL_DB_USER} -d {POSTMILL_DB_NAME} "
         f"--clean --if-exists --no-owner --no-acl",
         timeout=1200,
@@ -359,6 +592,98 @@ def reset_gitlab(
 
 
 # ---------------------------------------------------------------------------
+# Recreate-based reset (fast path)
+# ---------------------------------------------------------------------------
+
+def _remove_container(client: DockerClient, container: str) -> None:
+    """Stop + remove a container, retrying.
+
+    A bare ``docker rm -f`` on a busy GitLab container occasionally fails
+    with "did not receive an exit event"; a graceful stop first avoids it.
+    """
+    client.run(f"docker stop -t 20 {shlex.quote(container)}", check=False, timeout=120)
+    for _ in range(3):
+        client.run(f"docker rm -f {shlex.quote(container)}", check=False, timeout=120)
+        probe = client.run(
+            f"docker ps -a --format '{{{{.Names}}}}' | grep -x {shlex.quote(container)}",
+            check=False,
+            timeout=30,
+        )
+        if probe.returncode != 0:  # grep found nothing → container gone
+            return
+        time.sleep(5)
+    raise ResetFailed(f"could not remove container {container!r} after 3 attempts")
+
+
+def reset_site_recreate(
+    site: str,
+    *,
+    worker_id: int,
+    cfg: MPConfig,
+    client: DockerClient,
+) -> None:
+    """Reset ``site`` by recreating its container from the golden image.
+
+    Why this is the default strategy: the golden image already *contains*
+    the baked database files, so recreating the container restores state as
+    a bulk image-layer operation — no SQL replay at all. On hosts where
+    fsync is slow (e.g. ZFS pools without a fast SLOG device, where each
+    fsync costs ~100 ms), streaming a mysqldump back into mariadb costs one
+    to several fsyncs per DDL/commit and a 369-table Magento restore takes
+    tens of minutes to hours. Container recreation sidesteps that entirely
+    and additionally resets *filesystem* drift (caches, sessions, uploaded
+    files) that a DB-only restore would miss — strictly more rigorous.
+
+    Wall-clock = container boot + per-replica configure:
+      * shopping / shopping_admin: ~2-4 min (mariadb warmup dominates)
+      * gitlab: ~5-10 min (gitlab-ctl reconfigure + service boot)
+      * reddit: postgres boot; NOTE if the golden image was committed while
+        postgres was running (crash-consistent), every boot replays WAL
+        recovery which can take ~20+ min. Re-commit the golden image after
+        a clean ``pg_ctl stop`` once to make this path fast (see
+        MULTIWORKER_GUIDE §4.5).
+    """
+    # Imported lazily: bring_up imports from this module at top level, so a
+    # module-level import here would be circular.
+    from mp.bring_up import (
+        _docker_run_replica,
+        configure_replica_gitlab,
+        configure_replica_magento,
+    )
+
+    container = cfg.container_for(site, worker_id)
+    base_url = cfg.url_for(site, worker_id)
+
+    _remove_container(client, container)
+    _docker_run_replica(client, cfg, site, worker_id)
+
+    if site in ("shopping", "shopping_admin"):
+        # Includes wait-for-boot (HTTP + mariadb SELECT 1 probe) and the
+        # per-worker base_url rewrite.
+        configure_replica_magento(client, cfg, site, worker_id)
+        _wait_healthy(base_url, timeout_seconds=300, poll_interval=2.0)
+    elif site == "gitlab":
+        # Rewrites external_url/nginx/puma settings then gitlab-ctl reconfigure.
+        configure_replica_gitlab(client, cfg, worker_id)
+        _wait_healthy(
+            base_url + "/users/sign_in",
+            expect_body_contains="Sign in",
+            timeout_seconds=900,
+            poll_interval=5.0,
+        )
+    elif site == "reddit":
+        # Postmill needs no per-replica configure (URLs from request headers).
+        _wait_healthy(
+            base_url,
+            expect_body_contains="Postmill",
+            timeout_seconds=1800,  # generous: covers WAL recovery on a dirty golden image
+            poll_interval=5.0,
+        )
+    else:
+        raise ValueError(f"site {site!r} has no recreate-reset support")
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -368,8 +693,26 @@ def reset_site(
     worker_id: int,
     cfg: MPConfig,
     client: DockerClient,
+    strategy: str = "restore",
 ) -> None:
-    """Reset ``site`` on ``worker_id``'s replica to its golden state."""
+    """Reset ``site`` on ``worker_id``'s replica to its golden state.
+
+    ``strategy="restore"`` (default) does an in-place restore: stream the
+    golden SQL/dump back into the running container's DB (with relaxed
+    durability — see ``reset_magento``). This keeps the container's warm
+    InnoDB buffer pool + already-booted Magento, which matters because a
+    cold Magento boot on slow storage is itself a multi-minute operation
+    (see ``reset_site_recreate`` docstring).
+
+    ``strategy="recreate"`` removes + recreates the container from its golden
+    image. It additionally resets filesystem drift, but on Magento it
+    re-triggers the heavy boot sequence and is SLOWER on slow-fsync hosts —
+    use it only for postmill/gitlab or when the container is unrecoverable.
+    """
+    if strategy == "recreate":
+        return reset_site_recreate(site, worker_id=worker_id, cfg=cfg, client=client)
+    if strategy != "restore":
+        raise ValueError(f"unknown reset strategy {strategy!r}")
     container = cfg.container_for(site, worker_id)
     base_url = cfg.url_for(site, worker_id)
 
@@ -415,9 +758,10 @@ def reset_sites(
     worker_id: int,
     cfg: MPConfig,
     client: DockerClient,
+    strategy: str = "recreate",
 ) -> None:
     """Reset every site in ``sites`` (skipping read-only sites)."""
     for site in sites:
         if site in ("wikipedia", "map", "homepage"):
             continue
-        reset_site(site, worker_id=worker_id, cfg=cfg, client=client)
+        reset_site(site, worker_id=worker_id, cfg=cfg, client=client, strategy=strategy)

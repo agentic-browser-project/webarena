@@ -154,6 +154,41 @@ def _wait_container_db_and_http(
     )
 
 
+def _fast_clear_magento_var(client: DockerClient, container: str) -> None:
+    """Clear Magento's filesystem caches/sessions quickly.
+
+    ``rm -rf var/session/*`` enumerates + unlinks thousands of tiny ``sess_*``
+    files; on slow storage that alone blew past a 600 s timeout for the
+    shopping replica. Instead we rename each tree aside (an O(1) directory
+    rename), recreate it empty, and delete the renamed trees in a detached
+    background process so the reset doesn't block on the slow unlink. Stale
+    ``.del_*`` dirs from a prior run are also swept here.
+    """
+    # IMPORTANT: recreate each dir with the SAME owner+mode as the one we move
+    # aside. php-fpm runs as www-data and writes sessions/cache here; a plain
+    # `mkdir` would create the dir as root and php-fpm would hit
+    # "SessionHandler::read(): ... Permission denied" -> storefront 500.
+    # We copy the reference dir's owner+perms onto the fresh dir.
+    client.exec(
+        container,
+        "cd /var/www/magento2 && ts=$(date +%s%N) && "
+        "for d in var/cache var/page_cache var/session var/tmp "
+        "var/view_preprocessed generated/code generated/metadata; do "
+        "  if [ -e \"$d\" ]; then "
+        "    ref=\"${d}.del_${ts}\"; mv \"$d\" \"$ref\" 2>/dev/null; "
+        "    mkdir -p \"$d\"; "
+        "    chown --reference=\"$ref\" \"$d\" 2>/dev/null; "
+        "    chmod --reference=\"$ref\" \"$d\" 2>/dev/null; "
+        "  else mkdir -p \"$d\"; chmod 2777 \"$d\" 2>/dev/null; fi; "
+        "done; "
+        # Detach the slow unlink so it can't block (or be killed with) the reset.
+        "setsid sh -c 'rm -rf var/*.del_* generated/*.del_* >/dev/null 2>&1' "
+        "</dev/null >/dev/null 2>&1 & "
+        "true",
+        timeout=60,
+    )
+
+
 def _physical_swap_datadir(
     client: DockerClient,
     container: str,
@@ -280,14 +315,8 @@ def reset_magento(
             supervisor_prog=MAGENTO_MYSQL_SUPERVISOR_PROG,
         )
         # Filesystem caches/sessions may reference pre-reset entity IDs; clear
-        # them, flush Redis, and wait for the storefront.
-        client.exec(
-            container,
-            "cd /var/www/magento2 && "
-            "rm -rf var/cache/* var/page_cache/* var/session/* var/tmp/* "
-            "var/view_preprocessed/* var/log/* generated/code/* generated/metadata/* || true",
-            timeout=600,
-        )
+        # them (fast rename-aside), flush Redis, and wait for the storefront.
+        _fast_clear_magento_var(client, container)
         client.exec(
             container,
             "redis-cli -n 0 FLUSHDB; redis-cli -n 1 FLUSHDB",
@@ -424,9 +453,18 @@ def reset_postmill(
 ) -> None:
     """Restore a Postmill container to its golden state."""
     # FAST PATH: physical datadir swap when the on-container snapshot exists.
-    # The DB is the only mutable state tasks touch on Postmill; submission
-    # images + media cache are restored from tar regardless (cheap when the
-    # set is small; idempotent). See _physical_swap_datadir for the rationale.
+    # The postgres datadir swap restores the `submissions`/`comments`/etc.
+    # tables — the only state the deterministic reddit tasks are evaluated on.
+    #
+    # We deliberately do NOT re-extract the submission_images / media_cache
+    # tarballs here: submission_images is ~39 GB (baked into the golden image
+    # already), and re-streaming it on every per-task reset would dominate the
+    # benchmark wall-clock (measured: 200 s+ and climbing). A task that uploads
+    # an image leaves at most a harmless orphan FILE — its DB row is removed by
+    # the datadir swap, so listings/counts/program_html checks are unaffected.
+    # The rare task that verifies an uploaded image still has the full baked
+    # golden set present. (The logical SLOW PATH below still restores the tars
+    # for a from-scratch rebuild.)
     if _golden_datadir_exists(client, container, POSTMILL_PG_DATADIR):
         _physical_swap_datadir(
             client,
@@ -434,20 +472,13 @@ def reset_postmill(
             datadir=POSTMILL_PG_DATADIR,
             supervisor_prog=POSTMILL_PG_SUPERVISOR_PROG,
         )
-        client.exec(container, "rm -rf /var/www/html/var/cache/*", timeout=180, check=False)
-        client.run(
-            f"cat {shlex.quote(submission_images_tar_on_target)} | "
-            f"docker exec -i {shlex.quote(container)} bash -lc "
-            f"{shlex.quote('rm -rf /var/www/html/public/submission_images/* && tar -C /var/www/html/public/submission_images -xf -')}",
-            timeout=1800,
-            check=False,
-        )
-        client.run(
-            f"cat {shlex.quote(media_cache_tar_on_target)} | "
-            f"docker exec -i {shlex.quote(container)} bash -lc "
-            f"{shlex.quote('rm -rf /var/www/html/public/media/cache/* && tar -C /var/www/html/public/media/cache -xf -')}",
-            timeout=600,
-            check=False,
+        # Symfony fs cache (small) — fast rename-aside, background delete.
+        client.exec(
+            container,
+            "cd /var/www/html && ts=$(date +%s%N) && "
+            "[ -d var/cache ] && mv var/cache var/cache.del_${ts} 2>/dev/null; mkdir -p var/cache; "
+            "setsid sh -c 'rm -rf var/cache.del_* >/dev/null 2>&1' </dev/null >/dev/null 2>&1 & true",
+            timeout=60, check=False,
         )
         _wait_container_db_and_http(
             client, container, pg_check=True, timeout_seconds=300
@@ -582,13 +613,32 @@ def reset_gitlab(
         "gitlab-ctl start puma sidekiq gitlab-workhorse 2>&1 || true",
         timeout=120,
     )
-    # /users/sign_in is the only endpoint verified to return 200 on this image.
-    _wait_healthy(
-        health_url + "/users/sign_in" if not health_url.endswith("/users/sign_in") else health_url,
-        expect_body_contains="Sign in",
-        timeout_seconds=240,
-        poll_interval=2.0,
-    )
+    # Health check probed from INSIDE the container (puma listens on
+    # 127.0.0.1:8080) — avoids the host-side DNS/interface issue that makes
+    # the external base_url unreachable from the orchestrator's Python, and
+    # tolerates puma's ~2.5 min Rails preload. We poll gitlab-ctl for puma
+    # "run:" first, then curl the local sign-in page. If puma flaps (a known
+    # idle-OOM issue on some replicas, see MULTIWORKER_GUIDE §4.3), nudge it.
+    deadline = time.monotonic() + 600
+    while time.monotonic() < deadline:
+        st = client.exec(
+            container, "gitlab-ctl status puma 2>/dev/null | head -1",
+            check=False, timeout=30,
+        )
+        if st.stdout.strip().startswith(b"run:"):
+            h = client.exec(
+                container,
+                "curl -s -o /dev/null --max-time 5 -w '%{http_code}' "
+                "http://127.0.0.1:8080/users/sign_in 2>/dev/null || echo 000",
+                check=False, timeout=30,
+            )
+            if re.match(rb"^[23]\d{2}$", h.stdout.strip()):
+                return
+        else:
+            client.exec(container, "gitlab-ctl start puma 2>&1 || true",
+                        check=False, timeout=60)
+        time.sleep(5)
+    raise ResetFailed(f"{container}: gitlab puma/sign-in not healthy within 600s")
 
 
 # ---------------------------------------------------------------------------
@@ -758,9 +808,15 @@ def reset_sites(
     worker_id: int,
     cfg: MPConfig,
     client: DockerClient,
-    strategy: str = "recreate",
+    strategy: str = "restore",
 ) -> None:
-    """Reset every site in ``sites`` (skipping read-only sites)."""
+    """Reset every site in ``sites`` (skipping read-only sites).
+
+    Default ``strategy="restore"`` uses the fast physical-datadir-swap path
+    (mp/reset.py:reset_magento / reset_postmill) — verified ~14-39 s/site.
+    ``"recreate"`` re-creates the container from its golden image (slower for
+    Magento; pays a heavy cold boot) and is opt-in only.
+    """
     for site in sites:
         if site in ("wikipedia", "map", "homepage"):
             continue

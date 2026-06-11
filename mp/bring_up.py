@@ -36,8 +36,12 @@ from mp.config import (
     MAGENTO_DB_NAME,
     MAGENTO_DB_PASSWORD,
     MAGENTO_DB_USER,
+    MAGENTO_MYSQL_DATADIR,
+    MAGENTO_MYSQL_SUPERVISOR_PROG,
     POSTMILL_DB_NAME,
     POSTMILL_DB_USER,
+    POSTMILL_PG_DATADIR,
+    POSTMILL_PG_SUPERVISOR_PROG,
     SITE_INTERNAL_PORT,
     SITE_SOURCE_IMAGE,
     SITE_TO_CONTAINER_BASE,
@@ -46,7 +50,7 @@ from mp.config import (
     save_config,
 )
 from mp.docker_exec import DockerClient
-from mp.reset import _wait_healthy, reset_site
+from mp.reset import _wait_healthy, reset_site, snapshot_datadir
 
 log = logging.getLogger("mp.bring_up")
 
@@ -419,6 +423,43 @@ def populate_goldens(client: DockerClient, cfg: MPConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fast-reset datadir snapshots
+# ---------------------------------------------------------------------------
+
+def snapshot_all_datadirs(client: DockerClient, cfg: MPConfig) -> None:
+    """Create the in-container ``<datadir>.golden`` snapshot for every replica.
+
+    These power the physical-swap fast reset in ``mp/reset.py``. Magento
+    (shopping, shopping_admin) snapshot ``/var/lib/mysql``; Postmill (reddit)
+    snapshots ``/usr/local/pgsql/data``. GitLab is excluded — its reset
+    already does a physical rsync from the host-side golden tree.
+
+    Idempotent and re-runnable: re-snapshotting just overwrites the prior
+    snapshot. Run via ``mp.bring_up`` (it calls this in step 4b) or directly
+    after manually recreating a single replica.
+    """
+    specs = [
+        ("shopping", MAGENTO_MYSQL_DATADIR, MAGENTO_MYSQL_SUPERVISOR_PROG),
+        ("shopping_admin", MAGENTO_MYSQL_DATADIR, MAGENTO_MYSQL_SUPERVISOR_PROG),
+        ("reddit", POSTMILL_PG_DATADIR, POSTMILL_PG_SUPERVISOR_PROG),
+    ]
+    for w in range(cfg.num_workers):
+        for site, datadir, prog in specs:
+            container = cfg.container_for(site, w)
+            log.info("snapshotting datadir for fast-reset: %s", container)
+            try:
+                snapshot_datadir(
+                    client, container, datadir=datadir, supervisor_prog=prog
+                )
+            except Exception as e:  # noqa: BLE001 — log + continue; reset falls back to logical
+                log.warning(
+                    "datadir snapshot failed for %s (%s); reset will fall back "
+                    "to the slow logical path for this replica",
+                    container, e,
+                )
+
+
+# ---------------------------------------------------------------------------
 # Health checks after bring-up
 # ---------------------------------------------------------------------------
 
@@ -531,6 +572,14 @@ def bring_up(cfg: MPConfig, *, skip_goldens: bool = False, skip_configure: bool 
     if not skip_goldens:
         log.info("step 4/5: populating goldens (this is the slow step)")
         populate_goldens(client, cfg)
+    if not skip_configure:
+        # Snapshot each replica's DB datadir for the fast physical-swap reset
+        # (mp/reset.py). Done AFTER configure so the snapshot carries this
+        # worker's base_url, and after populate_goldens so the host-side
+        # logical golden (the fallback path) is also fresh. Cheap: one clean
+        # DB stop + local cp per replica.
+        log.info("step 4b/5: snapshotting per-worker DB datadirs (fast-reset)")
+        snapshot_all_datadirs(client, cfg)
     log.info("step 5/5: health checks")
     assert_all_healthy(cfg)
     log.info("saving config to mp/config.json")

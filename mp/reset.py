@@ -529,7 +529,7 @@ def reset_postmill(
             "[ -d var/cache ] && mv var/cache var/cache.del_${ts} 2>/dev/null; "
             "mkdir -p var/cache && chown www-data:www-data var/cache && chmod 775 var/cache; "
             "setsid sh -c 'rm -rf var/cache.del_* >/dev/null 2>&1' </dev/null >/dev/null 2>&1 & true",
-            timeout=60, check=False,
+            timeout=300, check=False,
         )
         _wait_container_db_and_http(
             client, container, pg_check=True, timeout_seconds=300
@@ -655,6 +655,22 @@ def reset_gitlab(
         f"rsync -a --delete {shlex.quote(golden_dir_in_container)}/ /var/opt/gitlab/",
         timeout=3600,
     )
+    # Force-copy the postgresql subtree IGNORING size+mtime quick checks.
+    # Plain `rsync -a` skips files whose size+mtime match the golden; since
+    # the live tree and the golden share history, that leaves a MIX of golden
+    # and local postgres files (pg_control vs WAL segments out of sync) that
+    # can fail WAL recovery with "PANIC: could not locate a valid checkpoint
+    # record" -> postgres down -> puma crash-loop -> 502. --ignore-times
+    # makes the postgres tree byte-faithful to the golden (delta transfer
+    # still applies, so cost is bounded).
+    client.exec(
+        container,
+        f"[ -d {shlex.quote(golden_dir_in_container)}/postgresql ] && "
+        f"rsync -a --delete --ignore-times "
+        f"{shlex.quote(golden_dir_in_container)}/postgresql/ /var/opt/gitlab/postgresql/ || true",
+        timeout=3600,
+        check=False,
+    )
     # CRITICAL: the host-side golden tree (populated by bring_up via a tar
     # streamed to the host) loses the in-container UIDs — every file lands as
     # root. `rsync -a` faithfully restores that root ownership, so afterwards
@@ -701,6 +717,41 @@ def reset_gitlab(
         "gitlab-ctl restart postgresql 2>&1 || true",
         timeout=900,
     )
+    # Verify postgres actually came up (socket present). A crash-inconsistent
+    # golden can fail WAL recovery ("PANIC: could not locate a valid
+    # checkpoint record") and crash-loop. Self-heal with pg_resetwal -f: the
+    # restored on-disk state IS the reference state for a benchmark reset, so
+    # discarding the unusable WAL is correct here.
+    pg_sock = "/var/opt/gitlab/postgresql/.s.PGSQL.5432"
+    pg_up = client.exec(
+        container,
+        f"for i in $(seq 1 45); do [ -S {pg_sock} ] && {{ echo OK; exit 0; }}; "
+        "sleep 2; done; echo DOWN",
+        timeout=180,
+        check=False,
+    )
+    if not pg_up.stdout.strip().endswith(b"OK"):
+        client.exec(
+            container,
+            "gitlab-ctl stop postgresql 2>/dev/null; sleep 2; "
+            "su -s /bin/sh gitlab-psql -c "
+            "'/opt/gitlab/embedded/bin/pg_resetwal -f /var/opt/gitlab/postgresql/data' 2>&1; "
+            "gitlab-ctl start postgresql 2>&1 || true",
+            timeout=600,
+            check=False,
+        )
+        pg_up = client.exec(
+            container,
+            f"for i in $(seq 1 45); do [ -S {pg_sock} ] && {{ echo OK; exit 0; }}; "
+            "sleep 2; done; echo DOWN",
+            timeout=180,
+            check=False,
+        )
+        if not pg_up.stdout.strip().endswith(b"OK"):
+            raise ResetFailed(
+                f"{container}: postgresql did not come up after restore "
+                "(even after pg_resetwal fallback)"
+            )
     client.exec(
         container,
         "gitlab-ctl restart redis 2>&1 || true",
@@ -774,7 +825,7 @@ def reset_gitlab(
             client.exec(container, "gitlab-ctl start puma 2>&1 || true",
                         check=False, timeout=60)
         time.sleep(5)
-    raise ResetFailed(f"{container}: gitlab puma/sign-in not healthy within 600s")
+    raise ResetFailed(f"{container}: gitlab puma/sign-in not healthy within 1200s")
 
 
 # ---------------------------------------------------------------------------

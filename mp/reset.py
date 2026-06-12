@@ -646,14 +646,18 @@ def reset_gitlab(
         "for i in $(seq 1 60); do pgrep -f 'sidekiq .*production' >/dev/null 2>&1 || break; sleep 1; done",
         timeout=90,
     )
-    # 60 min budget: the gitlab golden is ~23 GB on the reference deployment
-    # (postgresql + redis + git-data + uploads). rsync with --delete is bounded
-    # by the slower of disk-write and inode-update throughput; observed wall-
-    # clock for a clean reset is 8-20 min on hilbit2.
+    # 3 h budget: the gitlab golden is ~23 GB on the reference deployment
+    # (postgresql + redis + git-data + uploads). An incremental reset's rsync
+    # diff finishes in 8-20 min on hilbit2, but a replica resetting from this
+    # golden for the FIRST time (tree fresh from the docker image) is a
+    # near-full 23 GB copy — observed >60 min under host CPU contention,
+    # which blew the previous 3600 s budget and killed the rsync midway
+    # (leaving a half-restored tree). rsync resumes incrementally, so a
+    # generous budget is strictly safer than a tight one.
     client.exec(
         container,
         f"rsync -a --delete {shlex.quote(golden_dir_in_container)}/ /var/opt/gitlab/",
-        timeout=3600,
+        timeout=10800,
     )
     # Force-copy the postgresql subtree IGNORING size+mtime quick checks.
     # Plain `rsync -a` skips files whose size+mtime match the golden; since
@@ -668,7 +672,7 @@ def reset_gitlab(
         f"[ -d {shlex.quote(golden_dir_in_container)}/postgresql ] && "
         f"rsync -a --delete --ignore-times "
         f"{shlex.quote(golden_dir_in_container)}/postgresql/ /var/opt/gitlab/postgresql/ || true",
-        timeout=3600,
+        timeout=7200,
         check=False,
     )
     # CRITICAL: the host-side golden tree (populated by bring_up via a tar

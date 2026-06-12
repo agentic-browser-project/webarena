@@ -161,6 +161,26 @@ class MPConfig:
             return f"http://{self.host}:{port}/admin"
         return f"http://{self.host}:{port}"
 
+    def magento_base_url(self, site: str, worker_id: int) -> str:
+        """Return the URL to write into Magento's ``web/*/base_url`` config.
+
+        This is the document **root** (``http://host:port/``) — distinct from
+        :meth:`url_for`, which appends ``/admin`` for ``shopping_admin`` so the
+        agent navigates straight to the admin panel.
+
+        Magento's ``base_url`` must be the root, because Magento derives the
+        static/media/link URLs from it: with a ``/admin/`` suffix the CSS/JS
+        get requested at ``/admin/static/...`` which 302-loops to
+        ``/admin/admin/static/...`` (the real files live at ``/static/...``),
+        leaving the admin panel unstyled. Storefront and admin both take the
+        root here; the admin panel is reached at the ``/admin`` front-name
+        route layered on top of the root base_url.
+        """
+        if site not in ALL_MUTABLE_SITES:
+            raise ValueError(f"site {site} has no Magento base_url")
+        port = self.port_for(site, worker_id)
+        return f"http://{self.host}:{port}/"
+
     def container_for(self, site: str, worker_id: int) -> str:
         """Return the docker container name for (site, worker).
 

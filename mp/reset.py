@@ -110,9 +110,15 @@ def _wait_container_db_and_http(
     *,
     mysql_check: bool = False,
     pg_check: bool = False,
+    http_check: bool = True,
     timeout_seconds: float = 300,
 ) -> None:
     """Wait until the container's own DB + nginx are serving, probed from INSIDE.
+
+    ``http_check=False`` waits for the DB only and skips the HTTP probe — used
+    when the caller needs the DB up to rewrite config *before* the first HTTP
+    request warms the (full-page) cache, so the cache is built from the
+    corrected config rather than the stale golden value.
 
     Probing from inside the container (``docker exec ... curl 127.0.0.1``)
     rather than the external base_url avoids host-side DNS/interface/proxy
@@ -141,6 +147,8 @@ def _wait_container_db_and_http(
             )
             db_ok = r.returncode == 0 and r.stdout.strip() == b"1"
         if db_ok:
+            if not http_check:
+                return
             h = client.exec(
                 container,
                 "curl -s -o /dev/null --max-time 5 -w '%{http_code}' http://127.0.0.1/ 2>/dev/null || echo 000",
@@ -284,6 +292,40 @@ def _wait_healthy(
 # Magento (shopping / shopping_admin) — §14.1
 # ---------------------------------------------------------------------------
 
+def _rewrite_magento_base_url(
+    client: DockerClient, container: str, base_url: str
+) -> None:
+    """Set ``web/{,un}secure/base_url`` to ``base_url`` (the document root) and
+    NULL any static/media/link URL overrides so they re-derive from base_url.
+
+    ``base_url`` must be the document root (no ``/admin/`` suffix) — see
+    ``MPConfig.magento_base_url``. Idempotent; failure is non-fatal (the caller
+    has already restored the golden datadir, which carries a usable URL).
+
+    This is the single source of truth for the base-URL rewrite, used by both
+    the fast (datadir-swap) and slow (logical-restore) reset paths. Clearing
+    the static/media overrides defends against golden images that ship explicit
+    overrides pointing at the original build host (metis.lti.cs.cmu.edu), which
+    would otherwise leave assets pointing at an unreachable host.
+    """
+    base_url_sql = base_url if base_url.endswith("/") else base_url + "/"
+    sql = (
+        f"UPDATE core_config_data SET value='{base_url_sql}' "
+        f"WHERE path IN ('web/secure/base_url','web/unsecure/base_url'); "
+        "UPDATE core_config_data SET value=NULL WHERE path IN "
+        "('web/secure/base_static_url','web/unsecure/base_static_url',"
+        "'web/secure/base_media_url','web/unsecure/base_media_url',"
+        "'web/secure/base_link_url','web/unsecure/base_link_url');"
+    )
+    client.exec(
+        container,
+        f"mysql -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} {MAGENTO_DB_NAME} "
+        f"-e {shlex.quote(sql)}",
+        timeout=300,
+        check=False,
+    )
+
+
 def reset_magento(
     client: DockerClient,
     container: str,
@@ -304,9 +346,7 @@ def reset_magento(
     """
     # FAST PATH: if a pristine on-container datadir snapshot exists (made at
     # bring-up after this worker's base_url was configured), swap it back —
-    # ~24 s vs 2+ hours for the logical restore below. The snapshot already
-    # carries the correct per-worker base_url, so steps 2-5 (cache flush, URL
-    # rewrite) are unnecessary and we go straight to the health wait.
+    # ~24 s vs 2+ hours for the logical restore below.
     if _golden_datadir_exists(client, container, MAGENTO_MYSQL_DATADIR):
         _physical_swap_datadir(
             client,
@@ -314,8 +354,20 @@ def reset_magento(
             datadir=MAGENTO_MYSQL_DATADIR,
             supervisor_prog=MAGENTO_MYSQL_SUPERVISOR_PROG,
         )
-        # Filesystem caches/sessions may reference pre-reset entity IDs; clear
-        # them (fast rename-aside), flush Redis, and wait for the storefront.
+        # Wait for mariadb (DB only — don't warm the page cache yet), then
+        # enforce THIS worker's document-root base_url. A golden datadir can
+        # carry a stale/wrong base_url (an /admin/ suffix, a sibling worker's
+        # port, or the original metis.lti.cs.cmu.edu build host); rewriting
+        # here makes the reset self-correcting instead of trusting the snapshot.
+        _wait_container_db_and_http(
+            client, container, mysql_check=True, http_check=False,
+            timeout_seconds=300,
+        )
+        _rewrite_magento_base_url(client, container, base_url)
+        # Filesystem caches/sessions may reference pre-reset entity IDs, and the
+        # full-page cache may hold the stale base_url; clear them (fast
+        # rename-aside), flush Redis, then wait for the storefront so the cache
+        # is rebuilt from the corrected config.
         _fast_clear_magento_var(client, container)
         client.exec(
             container,
@@ -402,22 +454,11 @@ def reset_magento(
         timeout=120,
     )
 
-    # 5. Rewrite the base URL — see §14.1. Two surfaces:
-    #    (a) core_config_data.web/{secure,unsecure}/base_url (SQL)
-    #    (b) setup:store-config:set --base-url=... (Magento CLI; idempotent)
-    base_url_sql = base_url
-    if not base_url_sql.endswith("/"):
-        base_url_sql = base_url_sql + "/"
-    sql = (
-        f"UPDATE core_config_data SET value='{base_url_sql}' "
-        f"WHERE path IN ('web/secure/base_url','web/unsecure/base_url');"
-    )
-    client.exec(
-        container,
-        f"mysql -u {MAGENTO_DB_USER} -p{MAGENTO_DB_PASSWORD} {MAGENTO_DB_NAME} "
-        f"-e {shlex.quote(sql)}",
-        timeout=300,
-    )
+    # 5. Rewrite the base URL — see §14.1. ``base_url`` is the document root
+    #    (no /admin/ suffix); the helper also clears static/media overrides so
+    #    assets re-derive from it (defends against goldens that ship overrides
+    #    pointing at the original build host).
+    _rewrite_magento_base_url(client, container, base_url)
 
     # 6. Optional: restore Magento media (product images, uploads). Skipped
     #    by default because shopping_final_0712 / shopping_admin_final_0719
@@ -797,7 +838,9 @@ def reset_site(
             client,
             container,
             golden_sql_path_on_target=cfg.golden_sql_path(site),
-            base_url=base_url,
+            # base_url = document root (no /admin/); health_url = the agent-
+            # facing URL (shopping_admin's ends in /admin and 302s to login).
+            base_url=cfg.magento_base_url(site, worker_id),
             health_url=base_url,
             media_tarball_on_target=media_tar if media_exists else None,
         )

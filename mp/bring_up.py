@@ -168,7 +168,10 @@ def configure_replica_magento(
 ) -> None:
     """Apply per-replica base URL to a Magento replica."""
     container = cfg.container_for(site, worker_id)
-    base_url = cfg.url_for(site, worker_id)
+    # Magento's base_url is the document ROOT (no /admin/ suffix) — see
+    # MPConfig.magento_base_url. url_for() (which appends /admin for
+    # shopping_admin) is for the agent's navigation, not Magento config.
+    base_url = cfg.magento_base_url(site, worker_id)
     if not base_url.endswith("/"):
         base_url_slash = base_url + "/"
     else:
@@ -219,10 +222,18 @@ def configure_replica_magento(
                 break
             time.sleep(3)
 
-    # Rewrite the base URL in core_config_data + Magento CLI.
+    # Rewrite the base URL in core_config_data + Magento CLI. Also NULL any
+    # static/media/link URL overrides so they re-derive from base_url — a
+    # golden image built elsewhere can ship explicit overrides pointing at the
+    # original build host (e.g. metis.lti.cs.cmu.edu), which would survive a
+    # base_url rewrite and leave assets pointing at an unreachable host.
     sql = (
         f"UPDATE core_config_data SET value='{base_url_slash}' "
-        f"WHERE path IN ('web/secure/base_url','web/unsecure/base_url');"
+        f"WHERE path IN ('web/secure/base_url','web/unsecure/base_url'); "
+        "UPDATE core_config_data SET value=NULL WHERE path IN "
+        "('web/secure/base_static_url','web/unsecure/base_static_url',"
+        "'web/secure/base_media_url','web/unsecure/base_media_url',"
+        "'web/secure/base_link_url','web/unsecure/base_link_url');"
     )
     # 180s timeout (was 30s) — fresh Magento containers can take 60-120s before
     # the in-container MySQL daemon is ready to accept connections, especially

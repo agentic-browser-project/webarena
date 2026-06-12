@@ -58,6 +58,7 @@ coverage.xml
 
 # Django stuff:
 *.log
+!multiworker_run_artifacts/**/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -159,3 +160,15 @@ config_files*/*8.json
 config_files*/*9.json
 config_files*/test.json
 .openhands/
+
+# session state and experimental run artifacts
+.claude/
+TSA_VS_DENSE_RESULTS/
+mp/.inference_env
+
+# operator-specific live configs (commit only the *.example.json templates)
+mp/configs/config-tsa.json
+mp/configs/config-dense.json
+mp/configs/config-tsa-b200.json
+mp/configs/config-dense-b200.json
+

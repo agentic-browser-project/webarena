@@ -1,0 +1,24 @@
+Per-worker isolation verification — Playwright trace audit
+============================================================
+Method: For each worker's trace zip (containing trace.trace as JSONL),
+        regex-extract every "158.130.4.158:PORT" occurrence and tally
+        per port. Excluded ports: 4399 (homepage), 8888 (wikipedia),
+        13000/13030 (map) — these are shared read-only sites unrelated
+        to the test.
+
+Expected: each worker's trace should contain references to EXACTLY ONE
+shopping_admin port — its own, per cfg.port_for("shopping_admin", w):
+  w0=7780  w1=7880  w2=7980  w3=8090  w4=8180  w5=8280  w6=8380
+
+Result:
+  w0 (task 0, own_port=7780):  URL hits = 7780:268     ✓ ISOLATED
+  w1 (task 1, own_port=7880):  URL hits = 7880:427     ✓ ISOLATED
+  w2 (task 2, own_port=7980):  URL hits = 7980:699     ✓ ISOLATED
+  w3 (task 3, own_port=8090):  URL hits = 8090:532     ✓ ISOLATED
+  w4 (task 4, own_port=8180):  URL hits = 8180:532     ✓ ISOLATED
+  w5 (task 6, own_port=8280):  URL hits = 8280:310     ✓ ISOLATED
+  w6 (task 5, own_port=8380):  URL hits = 8380:271     ✓ ISOLATED
+
+Conclusion: every worker only navigated to its own per-worker shopping_admin
+replica. No cross-talk, no leakage. Per-worker URL routing (cfg.env_for +
+render_config_files) and per-worker BrowserContext both confirmed correct.

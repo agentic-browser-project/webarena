@@ -1,0 +1,87 @@
+2026-05-28 00:22:37,704 INFO mp.orchestrator: orchestrator starting: 5 tasks pending (0 already done) across 7 workers
+2026-05-28 00:22:37,809 [w0] INFO mp.worker: worker 0 started; cfg.host=158.130.4.158
+2026-05-28 00:22:37,810 [w1] INFO mp.worker: worker 1 started; cfg.host=158.130.4.158
+2026-05-28 00:22:37,812 [w4] INFO mp.worker: worker 4 started; cfg.host=158.130.4.158
+2026-05-28 00:22:37,812 [w3] INFO mp.worker: worker 3 started; cfg.host=158.130.4.158
+2026-05-28 00:22:37,813 [w2] INFO mp.worker: worker 2 started; cfg.host=158.130.4.158
+2026-05-28 00:22:37,814 [w5] INFO mp.worker: worker 5 started; cfg.host=158.130.4.158
+2026-05-28 00:22:37,814 [w5] INFO mp.worker: worker 5: poison pill, exiting
+2026-05-28 00:22:37,816 [w6] INFO mp.worker: worker 6 started; cfg.host=158.130.4.158
+2026-05-28 00:22:37,817 [w6] INFO mp.worker: worker 6: poison pill, exiting
+2026-05-28 00:22:37,840 [w0] INFO mp.worker: worker 0 task 470: resetting ['shopping_admin']
+2026-05-28 00:22:37,841 [w1] INFO mp.worker: worker 1 task 471: resetting ['shopping_admin']
+2026-05-28 00:22:37,841 [w4] INFO mp.worker: worker 4 task 472: resetting ['shopping_admin']
+2026-05-28 00:22:37,841 [w3] INFO mp.worker: worker 3 task 473: resetting ['shopping_admin']
+2026-05-28 00:22:37,841 [w2] INFO mp.worker: worker 2 task 474: resetting ['shopping_admin']
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+2026-05-28 00:32:55,118 - INFO - [Config file]: /tmp/tmpv12maz4g/470.json
+2026-05-28 00:32:55,118 [w0] INFO logger: [Config file]: /tmp/tmpv12maz4g/470.json
+2026-05-28 00:32:55,118 - INFO - [Intent]: Cancel order 302
+2026-05-28 00:32:55,118 [w0] INFO logger: [Intent]: Cancel order 302
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+2026-05-28 00:32:58,412 - INFO - [Config file]: /tmp/tmpktjaf9lm/471.json
+2026-05-28 00:32:58,412 [w1] INFO logger: [Config file]: /tmp/tmpktjaf9lm/471.json
+2026-05-28 00:32:58,412 - INFO - [Intent]: Cancel order 307
+2026-05-28 00:32:58,412 [w1] INFO logger: [Intent]: Cancel order 307
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+2026-05-28 00:33:02,461 - INFO - [Config file]: /tmp/tmpzi920o80/472.json
+2026-05-28 00:33:02,461 [w4] INFO logger: [Config file]: /tmp/tmpzi920o80/472.json
+2026-05-28 00:33:02,462 - INFO - [Intent]: Cancel order 299
+2026-05-28 00:33:02,462 [w4] INFO logger: [Intent]: Cancel order 299
+2026-05-28 00:33:03,203 - INFO - [Config file]: /tmp/tmpjky3ytf7/474.json
+2026-05-28 00:33:03,203 [w2] INFO logger: [Config file]: /tmp/tmpjky3ytf7/474.json
+2026-05-28 00:33:03,204 - INFO - [Intent]: Cancel order 305
+2026-05-28 00:33:03,204 [w2] INFO logger: [Intent]: Cancel order 305
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+/z/wangcy07/webarena-venv/lib/python3.12/site-packages/beartype/_util/hint/pep/utilpeptest.py:345: BeartypeDecorHintPep585DeprecationWarning: PEP 484 type hint typing.Mapping[str, gymnasium.spaces.space.Space[typing.Any]] deprecated by PEP 585 scheduled for removal in the first Python version released after October 5th, 2025. To resolve this, import this hint from "beartype.typing" rather than "typing". See this discussion for further details and alternatives:
+    https://github.com/beartype/beartype#pep-585-deprecations
+  warn(
+2026-05-28 00:33:08,229 - INFO - [Config file]: /tmp/tmpr_0n5u0l/473.json
+2026-05-28 00:33:08,229 [w3] INFO logger: [Config file]: /tmp/tmpr_0n5u0l/473.json
+2026-05-28 00:33:08,229 - INFO - [Intent]: Cancel order 301
+2026-05-28 00:33:08,229 [w3] INFO logger: [Intent]: Cancel order 301
+2026-05-28 00:33:23,424 [w0] INFO mp.worker: worker 0 task 470 done: score=0.0 err=None dt=645.6s
+2026-05-28 00:33:23,425 [w0] INFO mp.worker: worker 0: poison pill, exiting
+2026-05-28 00:33:23,425 INFO mp.orchestrator: progress: 1/5 done (worker=0 task=470 score=0.0 err=)
+Done convert python files to json
+2026-05-28 00:33:37,695 [w4] INFO mp.worker: worker 4 task 472 done: score=0.0 err=None dt=659.9s
+2026-05-28 00:33:37,697 INFO mp.orchestrator: progress: 2/5 done (worker=4 task=472 score=0.0 err=)
+2026-05-28 00:33:37,696 [w4] INFO mp.worker: worker 4: poison pill, exiting
+Done convert python files to json
+2026-05-28 00:33:44,553 [w1] INFO mp.worker: worker 1 task 471 done: score=0.0 err=None dt=666.7s
+2026-05-28 00:33:44,554 INFO mp.orchestrator: progress: 3/5 done (worker=1 task=471 score=0.0 err=)
+2026-05-28 00:33:44,554 [w1] INFO mp.worker: worker 1: poison pill, exiting
+Done convert python files to json
+2026-05-28 00:34:05,817 [w3] INFO mp.worker: worker 3 task 473 done: score=0.0 err=None dt=688.0s
+2026-05-28 00:34:05,819 INFO mp.orchestrator: progress: 4/5 done (worker=3 task=473 score=0.0 err=)
+2026-05-28 00:34:05,818 [w3] INFO mp.worker: worker 3: poison pill, exiting
+Done convert python files to json
+2026-05-28 00:34:23,914 [w2] INFO mp.worker: worker 2 task 474 done: score=0.0 err=None dt=706.1s
+2026-05-28 00:34:23,915 [w2] INFO mp.worker: worker 2: poison pill, exiting
+2026-05-28 00:34:23,916 INFO mp.orchestrator: progress: 5/5 done (worker=2 task=474 score=0.0 err=)
+Done convert python files to json
+2026-05-28 00:34:24,175 INFO mp.orchestrator: orchestrator done: 5 tasks completed
+{"pending": 0, "done": 5}

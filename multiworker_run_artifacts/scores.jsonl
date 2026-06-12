@@ -1,0 +1,7 @@
+{"worker_id": 0, "task_id": 0, "score": 0.0, "error": null, "duration_seconds": 64.57662561163306}
+{"worker_id": 6, "task_id": 5, "score": 0.0, "error": null, "duration_seconds": 66.67951278109103}
+{"worker_id": 5, "task_id": 6, "score": 0.0, "error": null, "duration_seconds": 69.65546496026218}
+{"worker_id": 1, "task_id": 1, "score": 0.0, "error": null, "duration_seconds": 84.4918435420841}
+{"worker_id": 4, "task_id": 4, "score": 0.0, "error": null, "duration_seconds": 89.1191445318982}
+{"worker_id": 3, "task_id": 3, "score": 0.0, "error": null, "duration_seconds": 91.65299010463059}
+{"worker_id": 2, "task_id": 2, "score": 0.0, "error": null, "duration_seconds": 104.13987573515624}

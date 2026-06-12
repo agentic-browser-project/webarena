@@ -1,0 +1,6 @@
+2026-05-27 22:33:17,506 [w2] INFO mp.worker: worker 2 started; cfg.host=158.130.4.158
+2026-05-27 22:33:17,534 [w2] INFO mp.worker: worker 2 task 2: resetting []
+2026-05-27 22:33:23,861 [w2] INFO logger: [Config file]: /tmp/tmpc722v3qh/2.json
+2026-05-27 22:33:23,862 [w2] INFO logger: [Intent]: What is the top-1 best-selling product type in Quarter 1 2022
+2026-05-27 22:35:01,648 [w2] INFO mp.worker: worker 2 task 2 done: score=0.0 err=None dt=104.1s
+2026-05-27 22:35:01,649 [w2] INFO mp.worker: worker 2: poison pill, exiting

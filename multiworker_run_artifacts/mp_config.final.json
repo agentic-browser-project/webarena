@@ -1,0 +1,17 @@
+{
+  "auth_root": "/z/wangcy07/webarena-mp/auth",
+  "config_files_root": "/z/wangcy07/webarena-mp/config_files",
+  "docker_host": "unix:///z/wangcy07/webarena/rootless-docker/run/docker.sock",
+  "golden_root": "/z/wangcy07/webarena-mp/golden",
+  "host": "158.130.4.158",
+  "map_replicas": 1,
+  "num_workers": 7,
+  "port_stride": 100,
+  "readonly_url_overrides": {
+    "homepage": "http://158.130.4.158:4399",
+    "map": "http://158.130.4.158:13000",
+    "wikipedia": "http://158.130.4.158:8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
+  },
+  "result_dir": "/z/wangcy07/webarena-mp/results",
+  "ssh_host": ""
+}

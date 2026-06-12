@@ -1,0 +1,6 @@
+2026-05-27 22:33:17,506 [w4] INFO mp.worker: worker 4 started; cfg.host=158.130.4.158
+2026-05-27 22:33:17,535 [w4] INFO mp.worker: worker 4 task 4: resetting []
+2026-05-27 22:33:23,672 [w4] INFO logger: [Config file]: /tmp/tmp01zez01k/4.json
+2026-05-27 22:33:23,672 [w4] INFO logger: [Intent]: What are the top-3 best-selling product in Jan 2023
+2026-05-27 22:34:46,627 [w4] INFO mp.worker: worker 4 task 4 done: score=0.0 err=None dt=89.1s
+2026-05-27 22:34:46,628 [w4] INFO mp.worker: worker 4: poison pill, exiting

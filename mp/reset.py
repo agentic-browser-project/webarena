@@ -514,10 +514,17 @@ def reset_postmill(
             supervisor_prog=POSTMILL_PG_SUPERVISOR_PROG,
         )
         # Symfony fs cache (small) — fast rename-aside, background delete.
+        # CRITICAL: recreate var/cache owned by www-data. php-fpm runs as
+        # www-data and Symfony creates var/cache/prod on the first request; a
+        # plain `mkdir` (run as root via docker exec) leaves var/cache
+        # root-owned -> "Unable to create the cache directory
+        # (/var/www/html/var/cache/prod)" 500. www-data is hard-coded (not
+        # `chown --reference`) so an already-root-owned dir self-heals.
         client.exec(
             container,
             "cd /var/www/html && ts=$(date +%s%N) && "
-            "[ -d var/cache ] && mv var/cache var/cache.del_${ts} 2>/dev/null; mkdir -p var/cache; "
+            "[ -d var/cache ] && mv var/cache var/cache.del_${ts} 2>/dev/null; "
+            "mkdir -p var/cache && chown www-data:www-data var/cache && chmod 775 var/cache; "
             "setsid sh -c 'rm -rf var/cache.del_* >/dev/null 2>&1' </dev/null >/dev/null 2>&1 & true",
             timeout=60, check=False,
         )

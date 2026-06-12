@@ -685,7 +685,12 @@ def reset_gitlab(
     client.exec(
         container,
         "chown -R git:git /var/opt/gitlab/gitlab-rails /var/opt/gitlab/git-data "
-        "/var/opt/gitlab/gitlab-shell /var/opt/gitlab/gitlab-workhorse 2>/dev/null; "
+        "/var/opt/gitlab/gitlab-shell /var/opt/gitlab/gitlab-workhorse "
+        # gitaly's runtime dir must be writable by git (gitaly runs as git and
+        # recreates gitaly.socket there on start); rsync restores it
+        # root-owned -> socket can't be created -> rails gets GRPC::Unavailable
+        # -> every repo-touching page/API 500s.
+        "/var/opt/gitlab/gitaly 2>/dev/null; "
         # nginx runs as gitlab-www and connects to workhorse's (and rails')
         # unix sockets; the socket DIRECTORIES are canonically git:gitlab-www
         # mode 750 — the gitlab-www group is nginx's only path in. The blanket
@@ -786,11 +791,23 @@ def reset_gitlab(
     # `start` is a silent no-op on an already-running service, but a service
     # that survived the stop above (see comment there) holds deleted socket
     # inodes and stale handles to the pre-rsync data — it MUST be bounced.
+    # gitaly first: it was never in the stop list (it serves no HTTP), but the
+    # rsync deletes its socket file out from under it, and rails reaches every
+    # repository through that socket — without a bounce, repo-touching
+    # pages/APIs fail with GRPC::Unavailable 500s while sign-in still works.
     client.exec(
         container,
-        "for s in puma sidekiq gitlab-workhorse; do "
+        "for s in gitaly puma sidekiq gitlab-workhorse; do "
         "gitlab-ctl restart $s 2>/dev/null || true; done",
         timeout=600,
+    )
+    # Verify gitaly recreated its socket (rails' only path to repositories).
+    client.exec(
+        container,
+        "for i in $(seq 1 30); do "
+        "[ -S /var/opt/gitlab/gitaly/gitaly.socket ] && break; sleep 2; done",
+        timeout=120,
+        check=False,
     )
     # Verify workhorse recreated its socket (nginx's only path to the app).
     client.exec(

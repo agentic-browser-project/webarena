@@ -597,6 +597,24 @@ def reset_gitlab(
         f"rsync -a --delete {shlex.quote(golden_dir_in_container)}/ /var/opt/gitlab/",
         timeout=3600,
     )
+    # CRITICAL: the host-side golden tree (populated by bring_up via a tar
+    # streamed to the host) loses the in-container UIDs — every file lands as
+    # root. `rsync -a` faithfully restores that root ownership, so afterwards
+    # /var/opt/gitlab/gitlab-rails/etc (mode 700) is root-owned and puma (which
+    # runs as the `git` user) gets "Permission denied @ rb_sysopen ... puma.rb"
+    # and crash-loops -> storefront 502. Restore the canonical Omnibus owners
+    # for the service trees that are NOT root-owned in a healthy install.
+    client.exec(
+        container,
+        "chown -R git:git /var/opt/gitlab/gitlab-rails /var/opt/gitlab/git-data "
+        "/var/opt/gitlab/gitlab-shell /var/opt/gitlab/gitlab-workhorse 2>/dev/null; "
+        "chown -R gitlab-psql:gitlab-psql /var/opt/gitlab/postgresql 2>/dev/null; "
+        "chown -R gitlab-redis:gitlab-redis /var/opt/gitlab/redis 2>/dev/null; "
+        "chown -R registry:registry /var/opt/gitlab/registry 2>/dev/null; "
+        "true",
+        timeout=300,
+        check=False,
+    )
     client.exec(
         container,
         "gitlab-ctl restart postgresql redis 2>&1 || true",

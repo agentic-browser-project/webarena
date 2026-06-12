@@ -172,22 +172,25 @@ def _fast_clear_magento_var(client: DockerClient, container: str) -> None:
     background process so the reset doesn't block on the slow unlink. Stale
     ``.del_*`` dirs from a prior run are also swept here.
     """
-    # IMPORTANT: recreate each dir with the SAME owner+mode as the one we move
-    # aside. php-fpm runs as www-data and writes sessions/cache here; a plain
-    # `mkdir` would create the dir as root and php-fpm would hit
+    # IMPORTANT: recreate each dir owned by www-data. php-fpm runs as www-data
+    # and writes sessions/cache/generated-code here; a plain `mkdir` (run as
+    # root via docker exec) leaves the dir root-owned and php-fpm hits
     # "SessionHandler::read(): ... Permission denied" -> storefront 500.
-    # We copy the reference dir's owner+perms onto the fresh dir.
+    # www-data is HARD-CODED (not `chown --reference` from the moved-aside dir):
+    # the reference may itself already be root-owned (from bring-up or a prior
+    # reset), and --reference would perpetuate that — so an already-root-owned
+    # dir would never heal. setgid (2775) so new files inherit the www-data
+    # group. This is the deeper fix for the earlier "var/session 500" flaw,
+    # which --reference only papered over.
     client.exec(
         container,
         "cd /var/www/magento2 && ts=$(date +%s%N) && "
         "for d in var/cache var/page_cache var/session var/tmp "
         "var/view_preprocessed generated/code generated/metadata; do "
-        "  if [ -e \"$d\" ]; then "
-        "    ref=\"${d}.del_${ts}\"; mv \"$d\" \"$ref\" 2>/dev/null; "
-        "    mkdir -p \"$d\"; "
-        "    chown --reference=\"$ref\" \"$d\" 2>/dev/null; "
-        "    chmod --reference=\"$ref\" \"$d\" 2>/dev/null; "
-        "  else mkdir -p \"$d\"; chmod 2777 \"$d\" 2>/dev/null; fi; "
+        "  [ -e \"$d\" ] && mv \"$d\" \"${d}.del_${ts}\" 2>/dev/null; "
+        "  mkdir -p \"$d\"; "
+        "  chown www-data:www-data \"$d\" 2>/dev/null; "
+        "  chmod 2775 \"$d\" 2>/dev/null; "
         "done; "
         # Detach the slow unlink so it can't block (or be killed with) the reset.
         "setsid sh -c 'rm -rf var/*.del_* generated/*.del_* >/dev/null 2>&1' "

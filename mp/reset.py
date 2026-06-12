@@ -659,6 +659,17 @@ def reset_gitlab(
         container,
         "chown -R git:git /var/opt/gitlab/gitlab-rails /var/opt/gitlab/git-data "
         "/var/opt/gitlab/gitlab-shell /var/opt/gitlab/gitlab-workhorse 2>/dev/null; "
+        # nginx runs as gitlab-www and connects to workhorse's (and rails')
+        # unix sockets; the socket DIRECTORIES are canonically git:gitlab-www
+        # mode 750 — the gitlab-www group is nginx's only path in. The blanket
+        # git:git above locks nginx out -> "connect() ... failed (13:
+        # Permission denied)" in nginx error log -> 502 on every page.
+        "chgrp gitlab-www /var/opt/gitlab/gitlab-workhorse "
+        "/var/opt/gitlab/gitlab-workhorse/sockets "
+        "/var/opt/gitlab/gitlab-rails/sockets 2>/dev/null; "
+        "chmod 750 /var/opt/gitlab/gitlab-workhorse "
+        "/var/opt/gitlab/gitlab-workhorse/sockets "
+        "/var/opt/gitlab/gitlab-rails/sockets 2>/dev/null; "
         "chown -R gitlab-psql:gitlab-psql /var/opt/gitlab/postgresql 2>/dev/null; "
         "chown -R gitlab-redis:gitlab-redis /var/opt/gitlab/redis 2>/dev/null; "
         # The redis TOP directory's canonical group is `git`, mode 750 (puma,

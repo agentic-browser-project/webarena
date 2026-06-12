@@ -627,10 +627,17 @@ def reset_gitlab(
     5. Restart puma + sidekiq + workhorse.
     6. Poll /users/sign_in until 200 (the working health endpoint per §14.3).
     """
+    # Stop each service in its own gitlab-ctl invocation: with a combined
+    # list, gitlab-ctl aborts at the first service that doesn't exist in this
+    # install (e.g. mailroom/registry), silently leaving everything after it
+    # (gitlab-workhorse!) running — which then keeps listening on a socket
+    # file the rsync below deletes, an unlinked inode nginx can never reach
+    # -> permanent 502.
     client.exec(
         container,
-        "gitlab-ctl stop puma sidekiq mailroom registry gitlab-workhorse 2>&1 || true",
-        timeout=120,
+        "for s in puma sidekiq mailroom registry gitlab-workhorse; do "
+        "gitlab-ctl stop $s 2>/dev/null || true; done",
+        timeout=300,
     )
     # Wait for sidekiq to finish in-flight jobs. The runit stop signal is
     # SIGTERM; sidekiq should drain. We bound the wait at 60 s.
@@ -683,21 +690,61 @@ def reset_gitlab(
         timeout=300,
         check=False,
     )
+    # Restart postgresql and redis in SEPARATE invocations with generous
+    # timeouts. A combined `gitlab-ctl restart postgresql redis` under a
+    # 120 s exec timeout can be killed mid-postgresql-restart (WAL replay on
+    # a loaded host easily exceeds it), so redis never restarts — and since
+    # the rsync above deleted redis.socket, every redis client (puma,
+    # workhorse keywatcher) then fails on a socket that no longer exists.
     client.exec(
         container,
-        "gitlab-ctl restart postgresql redis 2>&1 || true",
-        timeout=120,
+        "gitlab-ctl restart postgresql 2>&1 || true",
+        timeout=900,
     )
+    client.exec(
+        container,
+        "gitlab-ctl restart redis 2>&1 || true",
+        timeout=300,
+    )
+    # HARD requirement: redis must have recreated its socket before anything
+    # that depends on it starts. Raise if it never appears — a reset that
+    # "succeeds" without redis yields a permanently-502 replica.
+    sock = client.exec(
+        container,
+        "for i in $(seq 1 60); do [ -S /var/opt/gitlab/redis/redis.socket ] "
+        "&& { echo OK; exit 0; }; sleep 2; done; echo MISSING",
+        timeout=180,
+        check=False,
+    )
+    if not sock.stdout.strip().endswith(b"OK"):
+        raise ResetFailed(
+            f"{container}: redis.socket missing after redis restart — "
+            "dependent services (puma/workhorse) cannot start"
+        )
     # FLUSHALL via the unix socket; the path comes from the same Omnibus install.
     client.exec(
         container,
         "redis-cli -s /var/opt/gitlab/redis/redis.socket FLUSHALL || true",
         timeout=30,
     )
+    # RESTART (not start) the app services, each in its own invocation:
+    # `start` is a silent no-op on an already-running service, but a service
+    # that survived the stop above (see comment there) holds deleted socket
+    # inodes and stale handles to the pre-rsync data — it MUST be bounced.
     client.exec(
         container,
-        "gitlab-ctl start puma sidekiq gitlab-workhorse 2>&1 || true",
+        "for s in puma sidekiq gitlab-workhorse; do "
+        "gitlab-ctl restart $s 2>/dev/null || true; done",
+        timeout=600,
+    )
+    # Verify workhorse recreated its socket (nginx's only path to the app).
+    client.exec(
+        container,
+        "for i in $(seq 1 30); do "
+        "[ -S /var/opt/gitlab/gitlab-workhorse/sockets/socket ] && break; "
+        "sleep 2; done",
         timeout=120,
+        check=False,
     )
     # Health check probed from INSIDE the container (puma listens on
     # 127.0.0.1:8080) — avoids the host-side DNS/interface issue that makes
@@ -705,7 +752,10 @@ def reset_gitlab(
     # tolerates puma's ~2.5 min Rails preload. We poll gitlab-ctl for puma
     # "run:" first, then curl the local sign-in page. If puma flaps (a known
     # idle-OOM issue on some replicas, see MULTIWORKER_GUIDE §4.3), nudge it.
-    deadline = time.monotonic() + 600
+    # 20 min: puma's Rails preload alone is ~2.5 min on an idle host and
+    # 10+ min under heavy CPU contention (observed at load ~135); 600 s
+    # produced spurious failures with the data fully restored.
+    deadline = time.monotonic() + 1200
     while time.monotonic() < deadline:
         st = client.exec(
             container, "gitlab-ctl status puma 2>/dev/null | head -1",

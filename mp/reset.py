@@ -627,15 +627,23 @@ def reset_gitlab(
     5. Restart puma + sidekiq + workhorse.
     6. Poll /users/sign_in until 200 (the working health endpoint per §14.3).
     """
-    # Stop each service in its own gitlab-ctl invocation: with a combined
-    # list, gitlab-ctl aborts at the first service that doesn't exist in this
-    # install (e.g. mailroom/registry), silently leaving everything after it
-    # (gitlab-workhorse!) running — which then keeps listening on a socket
-    # file the rsync below deletes, an unlinked inode nginx can never reach
-    # -> permanent 502.
+    # Stop services BEFORE the rsync, each in its own gitlab-ctl invocation
+    # (a combined list aborts at the first service missing from this install,
+    # e.g. mailroom/registry, silently leaving later ones running).
+    #
+    # CRITICAL: postgresql, redis and gitaly MUST be stopped too — not just the
+    # app tier. The rsync below overwrites /var/opt/gitlab/postgresql while the
+    # files are mmap'd by a running postgres; the restored data dir then mixes
+    # new golden files with postgres's in-flight writes, and the next start
+    # fails WAL recovery with "PANIC: could not locate a valid checkpoint
+    # record" -> postgres down -> puma crash-loop -> 502. (Incremental resets
+    # mostly got away with it because the diff was tiny; a first-time near-full
+    # 23 GB copy reliably shreds a live postgres.) Stop the data tier so the
+    # rsync writes to quiescent files.
     client.exec(
         container,
-        "for s in puma sidekiq mailroom registry gitlab-workhorse; do "
+        "for s in puma sidekiq mailroom registry gitlab-workhorse "
+        "gitaly postgresql redis; do "
         "gitlab-ctl stop $s 2>/dev/null || true; done",
         timeout=300,
     )
@@ -715,23 +723,35 @@ def reset_gitlab(
         timeout=300,
         check=False,
     )
+    # UNCONDITIONALLY reset the WAL before starting postgres. The gitlab golden
+    # is captured from a running container (not a clean `gitlab-ctl stop`), so
+    # its postgresql tree is crash-inconsistent: pg_control names a checkpoint
+    # whose WAL segment is absent/partial -> "PANIC: could not locate a valid
+    # checkpoint record" on start. pg_resetwal -f discards the unusable WAL and
+    # rebuilds pg_control from the data files; for a benchmark reset the
+    # restored on-disk committed state IS the reference (the seeded gitlab data
+    # is static, never mid-write), so this is correct, not lossy. Done while
+    # postgres is stopped (it was stopped before the rsync). This must run on
+    # EVERY reset, not as a fallback: a replica can come up once and crash on a
+    # later checkpoint, so "socket appeared" is not proof of a sound cluster.
+    pg_sock = "/var/opt/gitlab/postgresql/.s.PGSQL.5432"
+    client.exec(
+        container,
+        "gitlab-ctl stop postgresql 2>/dev/null; sleep 2; "
+        "su -s /bin/sh gitlab-psql -c "
+        "'/opt/gitlab/embedded/bin/pg_resetwal -f /var/opt/gitlab/postgresql/data' 2>&1 | tail -1; "
+        "true",
+        timeout=300,
+        check=False,
+    )
     # Restart postgresql and redis in SEPARATE invocations with generous
-    # timeouts. A combined `gitlab-ctl restart postgresql redis` under a
-    # 120 s exec timeout can be killed mid-postgresql-restart (WAL replay on
-    # a loaded host easily exceeds it), so redis never restarts — and since
-    # the rsync above deleted redis.socket, every redis client (puma,
-    # workhorse keywatcher) then fails on a socket that no longer exists.
+    # timeouts (a combined restart under a tight timeout can be killed
+    # mid-postgresql WAL replay, leaving redis's rsync-deleted socket gone).
     client.exec(
         container,
         "gitlab-ctl restart postgresql 2>&1 || true",
         timeout=900,
     )
-    # Verify postgres actually came up (socket present). A crash-inconsistent
-    # golden can fail WAL recovery ("PANIC: could not locate a valid
-    # checkpoint record") and crash-loop. Self-heal with pg_resetwal -f: the
-    # restored on-disk state IS the reference state for a benchmark reset, so
-    # discarding the unusable WAL is correct here.
-    pg_sock = "/var/opt/gitlab/postgresql/.s.PGSQL.5432"
     pg_up = client.exec(
         container,
         f"for i in $(seq 1 45); do [ -S {pg_sock} ] && {{ echo OK; exit 0; }}; "
@@ -740,27 +760,12 @@ def reset_gitlab(
         check=False,
     )
     if not pg_up.stdout.strip().endswith(b"OK"):
-        client.exec(
-            container,
-            "gitlab-ctl stop postgresql 2>/dev/null; sleep 2; "
-            "su -s /bin/sh gitlab-psql -c "
-            "'/opt/gitlab/embedded/bin/pg_resetwal -f /var/opt/gitlab/postgresql/data' 2>&1; "
-            "gitlab-ctl start postgresql 2>&1 || true",
-            timeout=600,
-            check=False,
+        # pg_resetwal already ran above; if postgres still won't start, the
+        # cluster is unrecoverable from this golden — fail loudly rather than
+        # proceed to a permanently-502 replica.
+        raise ResetFailed(
+            f"{container}: postgresql did not come up after restore + pg_resetwal"
         )
-        pg_up = client.exec(
-            container,
-            f"for i in $(seq 1 45); do [ -S {pg_sock} ] && {{ echo OK; exit 0; }}; "
-            "sleep 2; done; echo DOWN",
-            timeout=180,
-            check=False,
-        )
-        if not pg_up.stdout.strip().endswith(b"OK"):
-            raise ResetFailed(
-                f"{container}: postgresql did not come up after restore "
-                "(even after pg_resetwal fallback)"
-            )
     client.exec(
         container,
         "gitlab-ctl restart redis 2>&1 || true",

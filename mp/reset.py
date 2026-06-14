@@ -27,6 +27,7 @@ import re
 import shlex
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from mp.config import (
@@ -329,6 +330,38 @@ def _rewrite_magento_base_url(
     )
 
 
+def _warm_magento_cache(
+    client: DockerClient, container: str, base_url: str
+) -> None:
+    """Prime the Magento full-page cache by rendering the storefront homepage once.
+
+    After a reset the full-page cache (FPC) is empty, so the *first* visitor's
+    homepage hit pays a full uncached render. On an idle host that is ~1-2 s; on
+    a CPU-saturated host it balloons to ~15 s and the browser appears to hang
+    ("loading too long"). Rendering it here — while nobody is waiting — moves
+    that one-time cost into the reset so the first real visitor (and the agent's
+    first step) hits a warm cache (~0.3 s).
+
+    The request is issued from INSIDE the container (``curl 127.0.0.1`` on
+    nginx's port 80) with the canonical ``Host`` header taken from ``base_url``,
+    so it is independent of host DNS/interface/proxy and Magento renders the
+    homepage (HTTP 200) rather than 302-redirecting to the canonical host. A
+    cookie-less GET produces the default ``X-Magento-Vary`` cache entry — exactly
+    what an anonymous first-time visitor receives. Best-effort: a failure here
+    never fails the reset (the page is simply rendered cold on first access).
+    """
+    host = urllib.parse.urlsplit(base_url).netloc
+    if not host:
+        return
+    client.exec(
+        container,
+        f"curl -s -o /dev/null --max-time 60 -H {shlex.quote('Host: ' + host)} "
+        "http://127.0.0.1/",
+        timeout=90,
+        check=False,
+    )
+
+
 def reset_magento(
     client: DockerClient,
     container: str,
@@ -381,6 +414,9 @@ def reset_magento(
         _wait_container_db_and_http(
             client, container, mysql_check=True, timeout_seconds=300
         )
+        # Prime the (now empty) full-page cache so the first real visitor isn't
+        # the one to pay the cold uncached homepage render.
+        _warm_magento_cache(client, container, base_url)
         return
 
     # SLOW PATH (no snapshot present): logical restore.
@@ -480,6 +516,10 @@ def reset_magento(
     # 7. Wait for the storefront to serve. After cache:flush Magento needs to
     #    re-compile templates on first request — first hit can take ~60 s.
     _wait_healthy(health_url, timeout_seconds=300, poll_interval=1.0)
+
+    # 8. Prime the (now empty) full-page cache so the first real visitor isn't
+    #    the one to pay the cold uncached homepage render.
+    _warm_magento_cache(client, container, base_url)
 
 
 # ---------------------------------------------------------------------------

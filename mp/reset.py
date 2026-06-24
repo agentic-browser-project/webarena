@@ -197,7 +197,10 @@ def _fast_clear_magento_var(client: DockerClient, container: str) -> None:
         "setsid sh -c 'rm -rf var/*.del_* generated/*.del_* >/dev/null 2>&1' "
         "</dev/null >/dev/null 2>&1 & "
         "true",
-        timeout=60,
+        # 600 (was 60): on a heavily-shared host the post-swap DB crash-recovery
+        # can starve the container so this exec is slow to schedule; the ops
+        # themselves are instant, so the larger ceiling just absorbs contention.
+        timeout=600,
     )
 
 
@@ -569,7 +572,7 @@ def reset_postmill(
             "[ -d var/cache ] && mv var/cache var/cache.del_${ts} 2>/dev/null; "
             "mkdir -p var/cache && chown www-data:www-data var/cache && chmod 775 var/cache; "
             "setsid sh -c 'rm -rf var/cache.del_* >/dev/null 2>&1' </dev/null >/dev/null 2>&1 & true",
-            timeout=300, check=False,
+            timeout=900, check=False,  # 900 (was 300): absorb shared-host contention
         )
         _wait_container_db_and_http(
             client, container, pg_check=True, timeout_seconds=300

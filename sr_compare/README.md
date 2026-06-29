@@ -60,9 +60,51 @@ sr_compare/
   `WA_HOST1`/`WA_HOST2` in config.env), site login cookies under `wa_exp/auth/` (`gen_auth.py`), and an
   HTTP proxy the agent reaches them through (`run_task.py` ports 18900-18907).
 
+## 0. Clone & build the dependency repos
+All repos live under the `agentic-browser-project` org. Pick a workspace dir `WS=/path/to/ws`.
+You build **three separate venvs** (different sglang builds can't share one env).
+
+```bash
+# --- this repo (contains sr_compare) ---
+git clone https://github.com/agentic-browser-project/webarena.git "$WS/webarena"
+cd "$WS/webarena/sr_compare"        # everything below is run from the bundle
+
+# --- A. bench env: sglang 0.5.9 + browser-use agent + scorer  => BENCH_PY ---
+python -m venv ~/venvs/bench && source ~/venvs/bench/bin/activate
+pip install "sglang[all]==0.5.9"                       # dense serve + judge + run_batch + scoring
+git clone https://github.com/agentic-browser-project/browser-use.git "$WS/browser-use"
+pip install -e "$WS/browser-use"                       # the agent fork (browser_use 0.13.x)
+playwright install chromium
+deactivate                                            # => BENCH_PY=~/venvs/bench/bin/python
+
+# --- B. TreeSparseAttention  => TSA_PY + TSA_REPO ---
+git clone https://github.com/agentic-browser-project/TreeSparseAttention.git "$WS/TreeSparseAttention"
+cd "$WS/TreeSparseAttention"
+python -m venv ~/venvs/tsa && source ~/venvs/tsa/bin/activate
+bash setup.sh                                          # builds the CUDA ext into ./build (see its README)
+deactivate                                            # => TSA_PY=~/venvs/tsa/bin/python, TSA_REPO=$WS/TreeSparseAttention
+
+# --- C. vortex_torch: sglang v0.5.9 + vortex  => VORTEX_PY ---
+git clone https://github.com/agentic-browser-project/vortex_torch.git "$WS/vortex_torch"
+cd "$WS/vortex_torch"                                  # sglang v0.5.9 ships under third_party/sglang/v0.5.9
+python -m venv ~/venvs/vortex59 && source ~/venvs/vortex59/bin/activate
+pip install -e third_party/sglang/v0.5.9/sglang/python --no-deps
+pip install sgl-kernel==0.3.21 --no-deps
+pip install torch==2.9.1 torchvision torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+pip install gguf xgrammar==0.1.27 pybase64 nvidia-cudnn-cu12==9.16.0.29 flashinfer-python
+pip install -e .                                       # install vortex_torch itself
+deactivate                                            # => VORTEX_PY=~/venvs/vortex59/bin/python
+
+# --- Models (HuggingFace) ---
+#   Qwen/Qwen3-VL-32B-Instruct  -> MODEL_PATH
+#   meta-llama/Llama-3.3-70B-Instruct -> JUDGE_MODEL
+```
+> The WebArena **sites** (shopping/admin/reddit/gitlab/wikipedia/map) are a separate deployment —
+> stand them up per the upstream WebArena docker instructions and point `WA_HOST1/2` at them.
+
 ## Setup
 ```bash
-cd /home/cc/temp/webarena/sr_compare
+cd "$WS/webarena/sr_compare"
 $EDITOR config.env          # point BENCH_PY/TSA_PY/VORTEX_PY, MODEL_PATH, JUDGE_MODEL,
                             # TSA_REPO, WA_HOST1/2 at your boxes
 source config.env

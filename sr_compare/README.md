@@ -6,11 +6,6 @@ sparse-attention methods, measuring pass rate + sparse-selection metrics, saving
 This is a **faithful copy of the currently running experiment** — same configs, same sites (including
 the **self-hosted** WebArena map on `:13000`), same scoring. If you just run it, you reproduce our setup.
 
-> An **optional** switch to run map on the **real `https://www.openstreetmap.org`** is documented at the
-> bottom (["Optional: map on real OpenStreetMap"](#optional-map-on-real-openstreetmap)) — **off by
-> default** because it makes map scores incomparable and gets rate-limited/blocked. Read that section
-> before flipping it.
-
 ## Configurations compared
 | dir | method | key config |
 |---|---|---|
@@ -142,59 +137,104 @@ $BENCH_PY wa_exp/final_table.py            # unified: retained-KV% | chunks | su
 
 ---
 
-## Optional: map on real OpenStreetMap
+## Task ID record (results)
 
-By default `map` is the **self-hosted** WebArena OSM (`:13000`), exactly like the main experiment. You
-can instead point it at the real site:
-```bash
-export WA_MAP_URL=https://www.openstreetmap.org   # (or uncomment it in config.env)
-```
-**Do not do this casually.** It changes results and is likely to get blocked. The risks and what to do
-about them:
+Three experiments were run with this bundle. For every method, the **passed / failed /
+execution-errored task-id lists** are stored as JSON under `task_outcomes/`:
 
-### Risk 1 — Reference answers won't match (results become incomparable)
-WebArena's map answers (driving/walking times, addresses, search hits) were annotated against the
-*self-hosted* OSM snapshot with its own routing engine. Real OSM uses different data + routers
-(OSRM/GraphHopper) → different results, so route-time and address tasks will be scored **wrong even when
-the agent does the right thing**. Map scores then are **not comparable** to the benchmark or to a
-self-hosted run.
-- **Mitigation**: treat map separately, re-judge by hand/semantics, or restrict to the knowledge-style
-  map tasks (e.g. "which states border X", scored by `must_include`) that don't depend on OSM data.
-- For a real apples-to-apples gain, **self-host Nominatim + OSRM** from an OSM extract (that *is*
-  WebArena's `:13000`) and keep `WA_MAP_URL` unset — reproducible, reference-matching, no rate limits.
+| table | experiment | per-method task-id JSONs |
+|---|---|---|
+| 1 | self-hosted WebArena, all sites, tasks 0–399 | `task_outcomes/self_hosted_map/<method>.json` |
+| 2 | block1: `map` switched to real `openstreetmap.org`, tasks id<100 (51 map tasks) | `task_outcomes/map_osm_block1/<method>.json` |
+| 3 | block2: `map` on real `openstreetmap.org`, tasks id≥100 (58 map tasks) | `task_outcomes/map_osm_block2/<method>.json` |
 
-### Risk 2 — Connectivity: the proxy needs internet egress
-The agent reaches every site **through an HTTP proxy** (`run_task.py` → Playwright `proxy.server`,
-ports 18900-18907). For real OSM that proxy **must have public-internet egress**.
-- Our in-house proxy only routes the *internal* WebArena network and **cannot reach the internet** — so
-  map-on-OSM will **not** work through it unchanged. Use a proxy with internet access, or run on a host
-  that can reach both your WebArena sites and the internet.
+Each `<method>.json` contains:
+`lenient` = {`n_pass`, `passed_ids`, `failed_ids`}, `official` = {`n_pass`, `passed_ids`, `failed_ids`},
+and `execution_errored_ids`. (`passed_ids + failed_ids` = every task that actually ran.)
+See `task_outcomes/README.md` for the exact file format.
 
-### Risk 3 — Anti-scraping / rate limits (expect throttling and IP bans)
-At our concurrency, real OSM will block us:
-- **Nominatim search** (`nominatim.openstreetmap.org`, the search-box backend): hard policy of
-  **≤ 1 request/second**, a valid identifying `User-Agent`/`Referer` required, **no bulk/automated
-  use** — violators are throttled then **IP-banned**. Our agent searches many times; 16-way concurrent
-  browsing breaches this immediately.
-- **Routing** ("Directions"): external demo routers (OSRM/GraphHopper), also rate-limited / may refuse
-  automated traffic.
-- **Tiles / website**: governed by the
-  [tile usage policy](https://operations.osmfoundation.org/policies/tiles/); bulk/automated access is
-  disallowed and bot-detected (headless Chromium can trip it).
-- Expect 429/403/captcha/empty results well before 812 tasks finish — and it's abusive of a free
-  community service to push hard.
+### Terms
+- **official** — strict WebArena scoring: `string_match` / `url_match` / `program_html`, with
+  `fuzzy_match` graded by the Llama-3.3-70B judge. A task passes iff `score >= 1`.
+- **lenient** — passes official **OR** the answer states the correct reference value but only failed
+  strict scoring on phrasing/formatting (re-judged by the LLM judge, `rescore_lenient.py`). This is the
+  **primary success rate** used below (real-OSM tasks especially: strict refs were annotated on the
+  self-hosted snapshot, so `official` is low by construction).
+- **execution error** — task that did not finish cleanly (connection timeout / crash); a subset of the
+  failed ids, recorded separately in `execution_errored_ids` (so you can tell "ran but wrong" from
+  "didn't finish").
+- **retained_KV** — measured fraction of the KV cache the sparse method actually attends to
+  (dense = 100%; lower = more aggressive sparsity).
+- **chunk_kept** — fraction of chunks/blocks kept by the sparse selector.
 
-**If you must run it, do so gently and legitimately:**
-- Set **`RO_CAP=1`** in `wa_exp/run_batch.py` and add a per-request delay so the *aggregate* Nominatim
-  rate stays **≤ 1 req/s** across ALL workers.
-- Set a real, identifying **User-Agent** (with contact) on the browser.
-- Prefer **self-hosting** Nominatim+OSRM (Risk 1 mitigation) over hitting the public service.
+### Why input/output length, retained_KV and chunk_kept are mostly blank
+- **Tables 1 & 2** were produced on **other machines**. Only the pass/fail task-id artifacts were copied
+  into this repo (plus block1's measured `retained_KV`). The raw trajectories (`llm_calls.jsonl`) and
+  the runtime sparse-metrics files stayed **local to those machines**, so input/output token lengths and
+  chunk% are not recorded here.
+- **Table 3** (this machine): the serving endpoints returned `prompt_tokens = 0` (input length not
+  reported) → **in_len blank**; and the TSA server build used here writes no sparse-metrics file →
+  **retained_KV / chunk_kept not recorded**. `out_len` (completion tokens, avg ± 3σ) is well-sampled
+  only for **dense** (779 logged calls); the trajectory logger silently drops calls whose response
+  format differs, so the TSA `out_len` `[n]` is small and biased.
 
----
+### Table 1 — self-hosted WebArena (all sites), first 400 tasks
+Cells = **lenient** pass / ran (rate). `wikipedia` has no single-site tasks in 0–399 (those are
+cross-site, counted under `cross/other`).
 
-## What we found on these map tasks (heads-up)
-On the map subset the per-site numbers are **noise-dominated**: small n, several tasks are actually
-knowledge questions or unachievable (ref `N/A`), and the OSM site often returns "not found" for
-*everyone* (same site state). Pass/fail hinges on whether the agent **falls back to its own knowledge**
-and on **answer phrasing**, not on attention quality. Compare `llm_calls.jsonl` inputs across configs to
-confirm the **page content is the same**; the differences are in the agent's behavior, not the site.
+| method | shopping | shopping_admin | reddit | gitlab | wikipedia | map | cross/other | **TOTAL** | exec_err | in_len | out_len | retained_KV | chunk_kept |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| dense | 49/124 (40%) | 24/89 (27%) | 4/10 (40%) | 20/72 (28%) | — | 7/100 (7%) | 0/5 (0%) | **104/400 (26%)** | 0 in 0–399 (**15 in full 812**) |  |  |  |  |
+| tsa_tk128 | 44/124 (35%) | 15/89 (17%) | 4/10 (40%) | 25/72 (35%) | — | 11/100 (11%) | 0/5 (0%) | **99/400 (25%)** | 0 |  |  |  |  |
+| tsa_tk96 | 39/124 (31%) | 20/89 (22%) | 3/10 (30%) | 17/72 (24%) | — | 9/100 (9%) | 0/5 (0%) | **88/400 (22%)** | 0 |  |  |  |  |
+| tsa_tk64 | 34/124 (27%) | 15/89 (17%) | 4/10 (40%) | 18/72 (25%) | — | 10/100 (10%) | 1/5 (20%) | **82/400 (20%)** | 0 |  |  |  |  |
+| tsa_tk48 | 29/124 (23%) | 12/89 (13%) | 2/10 (20%) | 15/72 (21%) | — | 10/100 (10%) | 0/5 (0%) | **68/400 (17%)** | 0 |  |  |  |  |
+| tsa_tk32 | 34/124 (27%) | 12/89 (13%) | 4/10 (40%) | 11/72 (15%) | — | 8/100 (8%) | 1/5 (20%) | **70/400 (18%)** | 0 |  |  |  |  |
+| vortex_block | 37/124 (30%) | 14/89 (16%) | 2/10 (20%) | 18/72 (25%) | — | 10/100 (10%) | 1/5 (20%) | **82/400 (20%)** | 0 |  |  |  |  |
+| vortex_quest | 34/124 (27%) | 15/89 (17%) | 5/10 (50%) | 22/72 (31%) | — | 10/100 (10%) | 0/5 (0%) | **86/400 (22%)** | 0 |  |  |  |  |
+
+> ⚠️ **Execution errors — read before comparing.** Within the **first 400 tasks every method has 0
+> execution errors**, so the Table-1 comparison is clean. **dense's full 812-task run, however, has 15
+> execution errors** — task ids **436–440, 506–510, 585–589** — all in the 400–811 range (outside this
+> table). They are **`ConnectTimeout`s** (the agent's headless browser couldn't reach the WebArena site
+> during a brief replica/proxy outage), **not** a model/attention failure, and they were **never
+> retried** (dense was a pre-existing reference run outside the self-healing loop). They have
+> `score = null` → counted as **fails**, so they slightly lower dense's full-812 number (200/812 = 24.6%;
+> excluding them, 200/797 = 25.1%). They do **not** affect the 0–399 comparison above. The sparse
+> configs each ran 0–399 with **0** execution errors.
+
+Task-id lists: `task_outcomes/self_hosted_map/<method>.json` (`lenient`/`official` `passed_ids`/`failed_ids`,
+and **`execution_errored_ids`** — dense's is `[436–440, 506–510, 585–589]`). Methods: dense,
+tsa_tk128/96/64/48/32, vortex_block, vortex_quest.
+
+### Table 2 — block1: map on real openstreetmap.org, tasks id<100 (51 map tasks)
+map is the only site, so per-site = total. `retained_KV` here is the value **measured on the machine
+that ran block1** (recorded in `task_outcomes/README.md`).
+
+| method | map (= total) lenient | official | in_len | out_len | retained_KV | chunk_kept |
+|---|---|---|---|---|---|---|
+| dense | 10/51 (20%) | 4/51 (8%) |  |  | 100% |  |
+| tsa_tk128 | 14/51 (27%) | 6/51 (12%) |  |  | 92.6% |  |
+| tsa_tk64 | 14/51 (27%) | 7/51 (14%) |  |  | 72.7% |  |
+| tsa_tk32 | 11/51 (22%) | 6/51 (12%) |  |  | 33.9% |  |
+| vortex_block | 11/51 (22%) | 7/51 (14%) |  |  | 6.3% |  |
+| vortex_quest | 16/51 (31%) | 9/51 (18%) |  |  | 12.0% |  |
+
+Task-id lists: `task_outcomes/map_osm_block1/<method>.json`.
+
+### Table 3 — block2: map on real openstreetmap.org, tasks id≥100 (58 map tasks, this machine)
+map is the only site. `out_len` = completion tokens, avg ± 3σ, `[n logged calls]`.
+`vortex_block`/`vortex_quest` are pending: vortex's cu128/NCCL stack needs a CUDA-12.8 GPU driver
+(this box was upgraded 560→570; the values land after a reboot). See
+`task_outcomes/map_osm_block2/summary.md` for the latest.
+
+| method | map (= total) lenient | official | in_len | out_len (avg±3σ) [n] | retained_KV | chunk_kept |
+|---|---|---|---|---|---|---|
+| dense | 21/58 (36%) | 17/58 (29%) |  | 411 ± 964 [779] |  |  |
+| tsa_tk128 | 6/58 (10%) | 4/58 (7%) |  | 442 ± 216 [35] |  |  |
+| tsa_tk64 | 4/58 (7%) | 3/58 (5%) |  | 437 ± 264 [35] |  |  |
+| tsa_tk32 | 6/58 (10%) | 4/58 (7%) |  | 355 ± 248 [53] |  |  |
+| vortex_block | — (pending) | — |  |  |  |  |
+| vortex_quest | — (pending) | — |  |  |  |  |
+
+Task-id lists: `task_outcomes/map_osm_block2/<method>.json`.

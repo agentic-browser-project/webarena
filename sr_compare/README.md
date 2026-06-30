@@ -222,6 +222,13 @@ that ran block1** (recorded in `task_outcomes/README.md`).
 
 Task-id lists: `task_outcomes/map_osm_block1/<method>.json`.
 
+**Reproduce Table 2:** `bash run_block1.sh` (task ids in `osm_block1_ids.txt` = the 51 single-site
+`map` tasks with id<100). It forces `WA_MAP_URL=https://www.openstreetmap.org`, serves each of the 6
+configs in turn, runs the 51 tasks, then brings up the judge and writes per-method task-id JSONs +
+`summary.md` under `task_outcomes/map_osm_block1_repro/`. Prereqs: the 3 venvs + models + a proxy with
+**public-internet egress** (real OSM) per the README setup. vortex needs a CUDA-12.8 GPU driver
+(>= ~570); on older drivers the script logs + skips the two vortex configs and still finishes dense+TSA.
+
 ### Table 3 — block2: map on real openstreetmap.org, tasks id≥100 (58 map tasks, this machine)
 map is the only site. `out_len` = completion tokens, avg ± 3σ, `[n logged calls]`.
 `vortex_block`/`vortex_quest` are pending: vortex's cu128/NCCL stack needs a CUDA-12.8 GPU driver

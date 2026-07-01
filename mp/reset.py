@@ -19,10 +19,11 @@ The primitives encode every audit finding in §14 of the plan:
 
 Every reset is followed by a health-poll that blocks until the public endpoint
 returns 200, with a timeout that escalates per-site (Magento: 90 s; Postmill:
-30 s; GitLab: 240 s) — the timeouts come from observed boot times on hilbit2.
+30 s; GitLab: 240 s) — the timeouts come from observed boot times on the reference host.
 """
 from __future__ import annotations
 
+import logging
 import re
 import shlex
 import time
@@ -45,9 +46,21 @@ from mp.config import (
 )
 from mp.docker_exec import DockerClient, DockerExecError
 
+log = logging.getLogger(__name__)
+
 
 class ResetFailed(RuntimeError):
     """Raised when a reset primitive cannot restore golden state."""
+
+
+class ResetStalled(ResetFailed):
+    """A reset made no forward progress (host I/O-starved).
+
+    Subclass of :class:`ResetFailed` so existing ``except ResetFailed`` sites
+    still catch it, but distinct so a caller can specifically fall back to a
+    clean ``recreate`` (rebuild from the golden image) instead of leaving a
+    half-restored replica. Raised by :func:`_rsync_with_watchdog`.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -55,12 +68,12 @@ class ResetFailed(RuntimeError):
 #
 # A logical restore (cat golden.sql | mysql, or pg_restore) is fsync-bound:
 # every commit forces a redo-log fsync, and on slow-fsync storage (ZFS without
-# a SLOG device — ~113 ms/fsync on hilbit2) a 369-table Magento restore takes
+# a SLOG device — ~113 ms/fsync on the reference host) a 369-table Magento restore takes
 # tens of minutes to hours, and a freshly-recreated container additionally
 # pays a heavy DB+app cold boot. A *physical* datadir swap — stop the DB, copy
 # a pristine on-container ``<datadir>.golden`` back over the live datadir,
 # start the DB — is a bulk sequential file copy that bypasses all per-commit
-# fsyncs and index rebuilds. Measured on hilbit2: shopping_admin reset went
+# fsyncs and index rebuilds. Measured on the reference host: shopping_admin reset went
 # from 2+ hours (logical) to ~24 s (physical swap).
 # ---------------------------------------------------------------------------
 
@@ -197,7 +210,10 @@ def _fast_clear_magento_var(client: DockerClient, container: str) -> None:
         "setsid sh -c 'rm -rf var/*.del_* generated/*.del_* >/dev/null 2>&1' "
         "</dev/null >/dev/null 2>&1 & "
         "true",
-        timeout=60,
+        # 600 (was 60): on a heavily-shared host the post-swap DB crash-recovery
+        # can starve the container so this exec is slow to schedule; the ops
+        # themselves are instant, so the larger ceiling just absorbs contention.
+        timeout=600,
     )
 
 
@@ -425,7 +441,7 @@ def reset_magento(
     #    privilege, per §14.1).
     #
     # Durability is relaxed for the duration of the restore: on hosts where
-    # fsync is slow (ZFS without SLOG ≈ 100 ms/fsync on hilbit2), the default
+    # fsync is slow (ZFS without SLOG ≈ 100 ms/fsync on the reference host), the default
     # innodb_flush_log_at_trx_commit=1 costs one fsync per commit and the
     # restore takes hours. During a golden restore durability buys nothing —
     # if the restore crashes we just run it again — so flush once per second
@@ -569,7 +585,7 @@ def reset_postmill(
             "[ -d var/cache ] && mv var/cache var/cache.del_${ts} 2>/dev/null; "
             "mkdir -p var/cache && chown www-data:www-data var/cache && chmod 775 var/cache; "
             "setsid sh -c 'rm -rf var/cache.del_* >/dev/null 2>&1' </dev/null >/dev/null 2>&1 & true",
-            timeout=300, check=False,
+            timeout=900, check=False,  # 900 (was 300): absorb shared-host contention
         )
         _wait_container_db_and_http(
             client, container, pg_check=True, timeout_seconds=300
@@ -594,9 +610,9 @@ def reset_postmill(
     #    ``DROP TABLE IF EXISTS`` before each ``CREATE TABLE``, avoiding the
     #    need for global DROP DATABASE privilege.
     # 20 min budget: postmill golden is ~478 MB pg_dump custom format which
-    # decompresses + index-builds in 3-8 min on hilbit2's reference deployment.
+    # decompresses + index-builds in 3-8 min on the reference deployment.
     # synchronous_commit=off for the restore session: skips the per-commit
-    # WAL fsync (~100 ms each on slow-fsync hosts like hilbit2's ZFS pool)
+    # WAL fsync (~100 ms each on slow-fsync hosts like the reference host's ZFS pool)
     # without disabling fsync entirely — a crash mid-restore loses only the
     # restore itself, which we'd re-run anyway.
     client.run(
@@ -644,6 +660,102 @@ def reset_postmill(
 # ---------------------------------------------------------------------------
 # GitLab — §14.9 / §4.4
 # ---------------------------------------------------------------------------
+
+def _rsync_with_watchdog(
+    client: DockerClient,
+    container: str,
+    *,
+    rsync_cmd: str,
+    progress_dir: str,
+    stall_seconds: float = 600.0,
+    poll_seconds: float = 30.0,
+    hard_timeout: float = 10800.0,
+    min_progress_bytes: int = 256 * 1024 * 1024,
+    rsync_match: str = "rsync",
+) -> None:
+    """Run ``rsync_cmd`` detached in ``container``, aborting if it stalls.
+
+    The gitlab restore rsyncs a ~23 GB golden tree in-container. On a heavily
+    shared host that rsync can drop into uninterruptible I/O-wait and *crawl*
+    at a few KB/s — not literally frozen, but so slow the 23 GB would take days
+    (observed under heavy shared-host load ~270: ~105 KB over 3 min), leaving the
+    replica down for the whole multi-hour budget. This wrapper launches the
+    rsync detached and watches the *throughput* of ``progress_dir``: if its
+    byte-size moves by less than ``min_progress_bytes`` for ``stall_seconds``,
+    the transfer can't finish in reasonable time, so the watchdog kills it and
+    raises :class:`ResetStalled` for the caller to fall back to a clean
+    ``recreate``. A healthy run (copy ≫256 MB/window, or the ``--delete`` pass
+    shrinking the tree by ≫256 MB) keeps resetting the reference and is
+    unaffected; on a calm host the rsync simply finishes and returns.
+
+    Rationale for a throughput threshold rather than exact-frozen detection: the
+    real stall *crept* (size and CPU both ticked up a hair each poll), so an
+    equality check never trips. |Δsize| ≥ 256 MB/10 min ≈ 437 KB/s is the floor
+    below which even an incremental gitlab restore is effectively dead and a
+    rebuild-from-image is both correct and faster.
+
+    Note: gitlab's two rsyncs run sequentially, so at most one rsync runs in
+    the container at a time; ``pkill -f rsync`` therefore targets only this one.
+    """
+    done = "/tmp/.rswd_done"
+    inner = f"{rsync_cmd}; echo $? > {done}"
+    client.exec(
+        container,
+        f"rm -f {done}; setsid sh -c {shlex.quote(inner)} "
+        f"</dev/null >/dev/null 2>&1 & true",
+        timeout=60,
+    )
+    size_cmd = f"du -sb {shlex.quote(progress_dir)} 2>/dev/null | cut -f1"
+
+    def _size() -> int:
+        out = client.exec(container, size_cmd, timeout=60, check=False).stdout.strip()
+        try:
+            return int(out or b"0")
+        except ValueError:
+            return -1
+
+    ref_size = _size()
+    last_change = time.time()
+    start = time.time()
+    while True:
+        rc = client.exec(
+            container, f"cat {done} 2>/dev/null || true", timeout=30, check=False
+        ).stdout.strip()
+        if rc:
+            if rc == b"0":
+                return
+            # rsync non-zero exit (a real error, not a stall): preserve the
+            # original strict behaviour and surface it.
+            raise ResetFailed(f"{container}: rsync exited with code {rc!r}")
+        size = _size()
+        now = time.time()
+        # Meaningful movement in EITHER direction (copy grows it, --delete
+        # shrinks it) counts as progress and resets the stall clock.
+        if size >= 0 and abs(size - ref_size) >= min_progress_bytes:
+            ref_size, last_change = size, now
+        elif now - last_change > stall_seconds:
+            client.exec(
+                container,
+                f"pkill -9 -f {shlex.quote(rsync_match)} 2>/dev/null; true",
+                timeout=30,
+                check=False,
+            )
+            raise ResetStalled(
+                f"{container}: rsync moved <{min_progress_bytes >> 20} MB in "
+                f"{int(stall_seconds)}s (stuck at {ref_size} B) — recreate"
+            )
+        if now - start > hard_timeout:
+            client.exec(
+                container,
+                f"pkill -9 -f {shlex.quote(rsync_match)} 2>/dev/null; true",
+                timeout=30,
+                check=False,
+            )
+            raise ResetStalled(
+                f"{container}: rsync exceeded {int(hard_timeout)}s — recreate"
+            )
+        time.sleep(poll_seconds)
+
 
 def reset_gitlab(
     client: DockerClient,
@@ -696,16 +808,18 @@ def reset_gitlab(
     )
     # 3 h budget: the gitlab golden is ~23 GB on the reference deployment
     # (postgresql + redis + git-data + uploads). An incremental reset's rsync
-    # diff finishes in 8-20 min on hilbit2, but a replica resetting from this
+    # diff finishes in 8-20 min on the reference host, but a replica resetting from this
     # golden for the FIRST time (tree fresh from the docker image) is a
     # near-full 23 GB copy — observed >60 min under host CPU contention,
     # which blew the previous 3600 s budget and killed the rsync midway
     # (leaving a half-restored tree). rsync resumes incrementally, so a
     # generous budget is strictly safer than a tight one.
-    client.exec(
+    _rsync_with_watchdog(
+        client,
         container,
-        f"rsync -a --delete {shlex.quote(golden_dir_in_container)}/ /var/opt/gitlab/",
-        timeout=10800,
+        rsync_cmd=f"rsync -a --delete {shlex.quote(golden_dir_in_container)}/ /var/opt/gitlab/",
+        progress_dir="/var/opt/gitlab",
+        hard_timeout=10800,
     )
     # Force-copy the postgresql subtree IGNORING size+mtime quick checks.
     # Plain `rsync -a` skips files whose size+mtime match the golden; since
@@ -715,14 +829,28 @@ def reset_gitlab(
     # record" -> postgres down -> puma crash-loop -> 502. --ignore-times
     # makes the postgres tree byte-faithful to the golden (delta transfer
     # still applies, so cost is bounded).
-    client.exec(
-        container,
-        f"[ -d {shlex.quote(golden_dir_in_container)}/postgresql ] && "
-        f"rsync -a --delete --ignore-times "
-        f"{shlex.quote(golden_dir_in_container)}/postgresql/ /var/opt/gitlab/postgresql/ || true",
-        timeout=7200,
-        check=False,
-    )
+    if (
+        client.exec(
+            container,
+            f"test -d {shlex.quote(golden_dir_in_container)}/postgresql "
+            "&& echo YES || echo NO",
+            timeout=30,
+            check=False,
+        )
+        .stdout.strip()
+        .endswith(b"YES")
+    ):
+        _rsync_with_watchdog(
+            client,
+            container,
+            rsync_cmd=(
+                f"rsync -a --delete --ignore-times "
+                f"{shlex.quote(golden_dir_in_container)}/postgresql/ "
+                f"/var/opt/gitlab/postgresql/"
+            ),
+            progress_dir="/var/opt/gitlab/postgresql",
+            hard_timeout=7200,
+        )
     # CRITICAL: the host-side golden tree (populated by bring_up via a tar
     # streamed to the host) loses the in-container UIDs — every file lands as
     # root. `rsync -a` faithfully restores that root ownership, so afterwards
@@ -1048,11 +1176,20 @@ def reset_site(
             health_url=base_url,
         )
     elif site == "gitlab":
-        reset_gitlab(
-            client,
-            container,
-            health_url=base_url,
-        )
+        # The rsync restore stalls on I/O-starved shared hosts. If the
+        # watchdog trips (ResetStalled), the in-place tree is half-synced and
+        # not trustworthy — recover with a clean rebuild from the golden image,
+        # which doesn't rsync at all. (A non-stall ResetFailed still propagates:
+        # that's a genuine error worth surfacing, not silently papering over.)
+        try:
+            reset_gitlab(
+                client,
+                container,
+                health_url=base_url,
+            )
+        except ResetStalled as e:
+            log.warning("%s; recreating gitlab replica %s from golden image", e, container)
+            reset_site_recreate("gitlab", worker_id=worker_id, cfg=cfg, client=client)
     else:
         raise ValueError(f"site {site!r} has no reset primitive")
 

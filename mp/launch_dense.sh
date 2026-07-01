@@ -27,8 +27,19 @@ echo "DENSE_MODEL_NAME:    $DENSE_MODEL_NAME"
 echo "SGLANG_BACKEND:      $SGLANG_BACKEND (fallback: $SGLANG_BACKEND_FALLBACK)"
 echo "MEM_FRAC_AGENT:      $MEM_FRAC_AGENT"
 
-# 1. Bring up the judge first.
-bash "$SCRIPT_DIR/launch_judge.sh"
+# 1. Bring up the judge first — but ONLY if it fits alongside the dense agent.
+#    On sm_120 (16 GB) the profile sets JUDGE_FITS=with_tsa_only: a 2B judge
+#    co-resident with the 4B dense agent (MEM_FRAC_AGENT=0.60) overflows VRAM and
+#    the dense server dies with "Not enough memory ... mem_fraction_static". The
+#    documented sm_120 mode is judge-off (deterministic / self-judge eval). Boot
+#    the judge only when it genuinely co-resides (JUDGE_FITS=yes) or when the
+#    caller forces it (LAUNCH_JUDGE=1).
+if [ "${JUDGE_FITS:-}" = "yes" ] || [ "${LAUNCH_JUDGE:-0}" = "1" ]; then
+    bash "$SCRIPT_DIR/launch_judge.sh"
+else
+    echo "[dense] skipping judge boot (JUDGE_FITS=${JUDGE_FITS:-unset}); dense gets the full GPU."
+    echo "        deterministic eval needs no judge; for fuzzy_match set LAUNCH_JUDGE=1 (needs a GPU that fits both)."
+fi
 
 # 2. Start SGLang in tmux on the GPU host. Try preferred attention backend,
 #    fall back automatically if it fails (e.g. flashinfer wheels missing sm_120).

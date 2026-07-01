@@ -311,7 +311,7 @@ def configure_replica_gitlab(
         timeout=30,
     )
     # Cap puma worker count. By default Omnibus sets puma['worker_processes']
-    # to the CPU count, which on hilbit2 means 128 workers per replica * N
+    # to the CPU count, which on deploy-host means 128 workers per replica * N
     # replicas — far more than needed for benchmark workload and prone to
     # killing each other via OOM when multiple GitLab replicas run. Cap to
     # 4 workers per replica, which is plenty for a single agent driving it.
@@ -333,7 +333,7 @@ def configure_replica_gitlab(
 def _verify_mysqldump(path: str) -> None:
     """Sanity-check a mysqldump output: catch a real docker-stream bug.
 
-    Observed on hilbit2: ``docker exec ... mysqldump ... > file`` very
+    Observed on deploy-host: ``docker exec ... mysqldump ... > file`` very
     occasionally produces output where two version-conditional comments get
     concatenated mid-line, e.g. ``/*!401/*!40000 ALTER TABLE`` instead of two
     separate ``/*!40101 SET ... */; /*!40000 ALTER TABLE ... */;`` lines.

@@ -22,7 +22,7 @@ The reset subsystem is complete, fast, and verified. The benchmark is fully set 
 
 ## 1. Why reset was slow — root cause
 
-The rootless-docker data-root on `hilbit2` lives on a **ZFS pool with no SLOG device**. Measured: 100 `fsync`'d 4 KB writes took **11.3 s** on the pool ⇒ **~110 ms per fsync**.
+The rootless-docker data-root on `deploy-host` lives on a **ZFS pool with no SLOG device**. Measured: 100 `fsync`'d 4 KB writes took **11.3 s** on the pool ⇒ **~110 ms per fsync**.
 
 A *logical* restore (`cat golden.sql | mysql`, or `pg_restore`) commits thousands of statements while rebuilding hundreds of tables + indexes. Each commit forces a redo-log fsync ⇒ thousands × 110 ms ⇒ **tens of minutes to hours**. Magento has **369 tables**; its restore was the worst case (2+ hours wall-clock observed).
 
@@ -91,7 +91,7 @@ Launch is a single detached orchestrator per backend; the harness was observed f
 
 ## 6. Why the full benchmark did not complete now — the honest blocker
 
-The benchmark requires the WebArena site containers (on `hilbit2`) to serve pages and reset between tasks. During execution the host was discovered to be **catastrophically CPU-saturated by an unrelated job**:
+The benchmark requires the WebArena site containers (on `deploy-host`) to serve pages and reset between tasks. During execution the host was discovered to be **catastrophically CPU-saturated by an unrelated job**:
 
 ```
 load average: 150.6, 151.8, 151.3      # on a 128-core box
@@ -110,7 +110,7 @@ This is an external infrastructure condition, independent of the connector and r
 
 ## 7. What to do to obtain the benchmark numbers
 
-When `hilbit2` load is reasonable (say < ~20 on the 128-core box):
+When `deploy-host` load is reasonable (say < ~20 on the 128-core box):
 
 ```bash
 # 0. (one-time, if a recreate ever wiped them) refresh fast-reset snapshots

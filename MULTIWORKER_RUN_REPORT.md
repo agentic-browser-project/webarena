@@ -2,14 +2,14 @@
 
 Reproduction record for running WebArena benchmark tasks 0–6 on the shopping_admin
 site in true multi-worker mode (one worker per task, all 7 in parallel) against
-the hilbit2 deployment, using qwen2.5:7b-instruct served by Ollama on
-gray.cis.upenn.edu (via SSH tunnel).
+the deploy-host deployment, using qwen2.5:7b-instruct served by Ollama on
+inference-host (via SSH tunnel).
 
 - **Date**: 2026-05-27 / 2026-05-28 (UTC overlap)
 - **Run**: 22:33:17 → 22:35:01 EDT (1m 45s wall, true parallel)
 - **Tasks**: 0,1,2,3,4,5,6 (all `shopping_admin`, all `require_reset: false`)
 - **Workers**: 7 (one task per worker, one replica per worker)
-- **Model**: qwen2.5:7b-instruct on gray.cis.upenn.edu, served via Ollama
+- **Model**: qwen2.5:7b-instruct on inference-host, served via Ollama
 - **Reset**: skipped (worker.py was patched to honor `require_reset: false`)
 - **Aggregate score**: 0/7 (model accuracy, NOT a multiworker issue — see §6)
 - **Multiworker isolation**: ✅ verified (every worker hit ONLY its own port)
@@ -18,7 +18,7 @@ gray.cis.upenn.edu (via SSH tunnel).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│ orchestrator host: hilbit2.cis.upenn.edu (158.130.4.158)            │
+│ orchestrator host: deploy-host (HOST_IP)            │
 │                                                                     │
 │  python -m mp.orchestrator (N=7, spawn-context multiprocessing)     │
 │   ├── w0 ──► shopping_admin       (legacy) │ http://...:7780/admin  │
@@ -29,31 +29,31 @@ gray.cis.upenn.edu (via SSH tunnel).
 │   ├── w5 ──► shopping_admin_w5             │ http://...:8280/admin  │
 │   └── w6 ──► shopping_admin_w6             │ http://...:8380/admin  │
 │                                                                     │
-│  rootless docker @ unix:///z/wangcy07/webarena/rootless-docker/...  │
+│  rootless docker @ unix:///data/webarena/rootless-docker/...  │
 │  Magento image (shared, 13.2 GB): webarena-shopping_admin-golden    │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
-              SSH tunnel (port 11434) on hilbit2:11434 → gray:11434
+              SSH tunnel (port 11434) on deploy-host:11434 → inference-host:11434
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│ inference host: gray.cis.upenn.edu                                  │
+│ inference host: inference-host                                  │
 │  ollama serve  ──►  qwen2.5:7b-instruct (Q4_K_M, ~4.7 GB)           │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 Worker_0 keeps the legacy container `shopping_admin` (the live one already
-running on hilbit2, image `shopping_admin_final_0719`). Workers 1–6 each get
+running on deploy-host, image `shopping_admin_final_0719`). Workers 1–6 each get
 their own per-worker Magento replica spawned from the same image. The replicas
 are connected only by sharing the docker daemon — they have **independent
 MySQL, Redis, Elasticsearch, and filesystem state**.
 
 ## 2. Setup steps (chronological)
 
-1. **Verified hilbit2 prerequisites** (read-only): repo at
-   `/z/wangcy07/webarena-repo`, venv at `/z/wangcy07/webarena-venv` (Python 3.12.3),
-   Playwright Chromium 1223 at `/z/wangcy07/pw_browsers`, rootless docker socket,
-   SSH tunnel hilbit2:11434 → gray:11434 already up, `qwen2.5:7b-instruct` pulled
-   on gray, `webarena-shopping_admin-golden:latest` already tagged
+1. **Verified deploy-host prerequisites** (read-only): repo at
+   `/data/webarena-repo`, venv at `/data/webarena-venv` (Python 3.12.3),
+   Playwright Chromium 1223 at `/data/pw_browsers`, rootless docker socket,
+   SSH tunnel deploy-host:11434 → inference-host:11434 already up, `qwen2.5:7b-instruct` pulled
+   on inference-host, `webarena-shopping_admin-golden:latest` already tagged
    (13.2 GB, idempotent from a prior bring-up).
 2. **Patched `mp/config.py`** to add `_HOST_PORT_RESERVED = {8080, 8085}` and
    make `port_for()` skip them — without this, worker_3's natural port 8080
@@ -62,16 +62,16 @@ MySQL, Redis, Elasticsearch, and filesystem state**.
 3. **Spawned 5 new replicas** `shopping_admin_w2..w6` from the golden image,
    each bound to its own host port (7980/8090/8180/8280/8380).
 4. **Configured base URLs** on each new replica via Magento CLI
-   (`bin/magento setup:store-config:set --base-url=http://158.130.4.158:PORT/`)
+   (`bin/magento setup:store-config:set --base-url=http://HOST_IP:PORT/`)
    and direct SQL UPDATE on `core_config_data`. Used a 300-second per-query
    timeout to absorb table-lock contention from Magento's first-boot internal
    cron jobs. Disabled admin password rotation.
 5. **Populated the shopping_admin golden** at
-   `/z/wangcy07/webarena-mp/golden/shopping_admin/golden.sql`
+   `/data/webarena-mp/golden/shopping_admin/golden.sql`
    via `mysqldump --single-transaction --add-drop-table --no-tablespaces` on
    the worker_0 (legacy) container — 7.7 MB.
 6. **Bumped `mp/config.json`** to `num_workers: 7` and re-rendered per-worker
-   task configs (`/z/wangcy07/webarena-mp/config_files/w{0..6}/*.json`) so
+   task configs (`/data/webarena-mp/config_files/w{0..6}/*.json`) so
    every worker's start_url points at its own port.
 7. **Patched `mp/worker.py`** to honor `require_reset: false` from task configs.
    This was a faithful semantic fix, not a workaround: the task configs
@@ -118,7 +118,7 @@ $ cat scores.jsonl
 
 Per-worker isolation was verified by parsing each worker's
 `<result_dir>/w{w}/traces/{task_id}.zip → trace.trace` (Playwright trace
-JSONL) and counting occurrences of `158.130.4.158:PORT` for every Magento
+JSONL) and counting occurrences of `HOST_IP:PORT` for every Magento
 port (excluding shared read-only ports 4399 homepage / 8888 wikipedia /
 13000-13030 map).
 
@@ -146,16 +146,16 @@ proof that:
 
 ## 5. Code changes shipped during this run
 
-### 5.1 `mp/config.py` — port collision avoidance (committed to hilbit2)
+### 5.1 `mp/config.py` — port collision avoidance (committed to deploy-host)
 ```diff
-+# Host ports already bound by shared resources on hilbit2 (the map container
++# Host ports already bound by shared resources on deploy-host (the map container
 +# binds 127.0.0.1:8080 and :8085). port_for() skips these to avoid collisions.
 +_HOST_PORT_RESERVED: set[int] = {8080, 8085}
 
  def port_for(self, site: str, worker_id: int) -> int:
      ...
      port = BASE_PORTS[site] + self.port_stride * worker_id
-+    # Skip ports reserved by shared resources (e.g. the map container on hilbit2).
++    # Skip ports reserved by shared resources (e.g. the map container on deploy-host).
 +    while port in _HOST_PORT_RESERVED:
 +        port += 10
      return port
@@ -191,7 +191,7 @@ with Magento's internal cron jobs (which were already running first-boot in
 the new replicas and writing to `cron_schedule`), all 7 restores blew past
 the `reset_magento` 600-second timeout. Every task ended with
 `error: reset failed: TimeoutExpired`. That run is archived at
-`/z/wangcy07/webarena-mp/results/archive_20260527_223310/`.
+`/data/webarena-mp/results/archive_20260527_223310/`.
 
 With the patched worker.py, the restore phase is correctly skipped for
 require_reset=false tasks, and the wall-clock for tasks 0–6 dropped from
@@ -217,7 +217,7 @@ generally harder than average). **The 0.0 scores reflect model capability,
 not any defect in the multiworker harness, the resets, or the per-replica
 plumbing.**
 
-The previous archived run on hilbit2 (10 tasks: 7,8,9,10,16-20,32; same
+The previous archived run on deploy-host (10 tasks: 7,8,9,10,16-20,32; same
 qwen2.5:7b model with N=2) also scored 0.0 on every task, which is consistent.
 
 ## 7. Files saved
@@ -230,28 +230,28 @@ Under `multiworker_run_artifacts/` in this repo:
 | `orchestrator.log`                    | Orchestrator stdout: worker spawning, task assignment, progress.           |
 | `logs/worker_0..6.log`                | Per-worker logs: started/reset/agent-loop/done lines for each worker.      |
 | `bring_up_w2_w6.log`                  | Bring-up log: replica creation, base URL config, golden mysqldump.         |
-| `mp_config.final.json`                | The `mp/config.json` on hilbit2 after the run (num_workers=7).             |
+| `mp_config.final.json`                | The `mp/config.json` on deploy-host after the run (num_workers=7).             |
 | `trace_isolation_verification.txt`    | Per-worker port-isolation audit (see §4).                                  |
 
-Not pulled to local (large; lives on hilbit2):
+Not pulled to local (large; lives on deploy-host):
 
-| Path on hilbit2                                                | Description                                 |
+| Path on deploy-host                                                | Description                                 |
 |----------------------------------------------------------------|---------------------------------------------|
-| `/z/wangcy07/webarena-mp/results/w{w}/render_{t}.html`         | Trajectory render — one HTML per task.      |
-| `/z/wangcy07/webarena-mp/results/w{w}/traces/{t}.zip`          | Playwright trace zip — replay with `playwright show-trace`. |
-| `/z/wangcy07/webarena-mp/golden/shopping_admin/golden.sql`     | 7.7 MB Magento DB dump (for future resets). |
-| `/z/wangcy07/webarena-mp/results/archive_*`                    | Two earlier failed-reset attempts.          |
+| `/data/webarena-mp/results/w{w}/render_{t}.html`         | Trajectory render — one HTML per task.      |
+| `/data/webarena-mp/results/w{w}/traces/{t}.zip`          | Playwright trace zip — replay with `playwright show-trace`. |
+| `/data/webarena-mp/golden/shopping_admin/golden.sql`     | 7.7 MB Magento DB dump (for future resets). |
+| `/data/webarena-mp/results/archive_*`                    | Two earlier failed-reset attempts.          |
 
 ## 8. How to reproduce
 
 ```bash
-# On hilbit2 (after SSH tunnel hilbit2:11434 → gray:11434 is up):
-cd /z/wangcy07/webarena-repo
-source /z/wangcy07/webarena-venv/bin/activate
-export PYTHONPATH=/z/wangcy07/webarena-repo
-export PLAYWRIGHT_BROWSERS_PATH=/z/wangcy07/pw_browsers
-export NLTK_DATA=/z/wangcy07/nltk_data
-export TIKTOKEN_CACHE_DIR=/z/wangcy07/tiktoken_cache
+# On deploy-host (after SSH tunnel deploy-host:11434 → inference-host:11434 is up):
+cd /data/webarena-repo
+source /data/webarena-venv/bin/activate
+export PYTHONPATH=/data/webarena-repo
+export PLAYWRIGHT_BROWSERS_PATH=/data/pw_browsers
+export NLTK_DATA=/data/nltk_data
+export TIKTOKEN_CACHE_DIR=/data/tiktoken_cache
 export OPENAI_API_BASE=http://127.0.0.1:11434/v1
 export OPENAI_API_KEY=ollama
 export WEBARENA_EVAL_MODEL=qwen2.5:7b-instruct
@@ -297,7 +297,7 @@ A second run validated the harness end-to-end for **mutation tasks that require 
 | Per-worker task configs | `require_reset: false` → `true` for 5 selected task ids | Override the dataset's uniform-false flag so the patched worker.py actually runs the restore. |
 | Workers used | 5 (orchestrator still spawns 7, but only 5 grab tasks; the other 2 take poison pills and exit) | Lower IO/CPU pressure than 7-way contention. Earlier 7-way attempt timed out at the `rm var/cache` step. |
 
-The first attempt (N=7, `rm var/cache` timeout=300 s) failed all 7 tasks at the rm step despite restores succeeding under the bumped 1800 s mysql timeout. That run is archived at `/z/wangcy07/webarena-mp/results/archive_20260528_000616/`.
+The first attempt (N=7, `rm var/cache` timeout=300 s) failed all 7 tasks at the rm step despite restores succeeding under the bumped 1800 s mysql timeout. That run is archived at `/data/webarena-mp/results/archive_20260528_000616/`.
 
 ### 9.3 Run summary
 
@@ -373,6 +373,6 @@ Earlier read-only-run artifacts remain in `multiworker_run_artifacts/` (outside 
 - **Map container's port 8080 collision** will recur for any future
   shopping_admin worker_3-equivalent. The reserved-port skip in §5.1 is a
   durable fix.
-- **The repo at `/z/wangcy07/webarena-repo` on hilbit2 is not a git checkout**
+- **The repo at `/data/webarena-repo` on deploy-host is not a git checkout**
   (no `.git`). Local source modifications would need to be `scp`'d up, or the
   repo re-initialised as a real checkout to track patches.

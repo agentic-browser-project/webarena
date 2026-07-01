@@ -19,7 +19,7 @@ ALL_MUTABLE_SITES: tuple[Site, ...] = ("shopping", "shopping_admin", "reddit", "
 ALL_READONLY_SITES: tuple[str, ...] = ("wikipedia", "map", "homepage")
 ALL_SITES: tuple[str, ...] = ALL_MUTABLE_SITES + ALL_READONLY_SITES
 
-# Host ports already bound by shared resources on hilbit2 (the map container 
+# Host ports already bound by shared resources on deploy-host (the map container 
 # binds 127.0.0.1:8080 and :8085). port_for() skips these to avoid collisions.
 _HOST_PORT_RESERVED: set[int] = {8080, 8085}
 
@@ -69,7 +69,7 @@ POSTMILL_DB_NAME = "postmill"
 # In-container DB data directories + the supervisor program that runs each DB.
 # Used by the physical-datadir-swap reset (mp/reset.py): a bulk file copy of
 # the data directory is ~100x faster than a logical SQL/dump replay on
-# slow-fsync storage (ZFS without SLOG ≈ 113 ms/fsync on hilbit2), because it
+# slow-fsync storage (ZFS without SLOG ≈ 113 ms/fsync on deploy-host), because it
 # skips the thousands of per-commit fsyncs + index rebuilds a logical restore
 # incurs. ``<datadir>.golden`` is a pristine copy made at bring-up time, after
 # the per-worker base_url has been configured, so the swap needs no re-config.
@@ -113,23 +113,23 @@ class MPConfig:
     """
 
     num_workers: int = 2
-    host: str = "158.130.4.158"
+    host: str = "127.0.0.1"
     # port_stride=100 ensures shopping/shopping_admin/gitlab/reddit don't
     # collide across workers (worst case: shopping_w0=7770, shopping_w1=7870,
     # gitlab_w0=8023, gitlab_w7=8723 — all distinct for N=8).
     port_stride: int = 100
-    docker_host: str = "unix:///z/wangcy07/webarena/rootless-docker/run/docker.sock"
-    golden_root: str = "/z/wangcy07/webarena/mp/golden"
-    config_files_root: str = "/z/wangcy07/webarena/mp/config_files"
-    auth_root: str = "/z/wangcy07/webarena/mp/auth"
+    docker_host: str = "unix:///data/webarena/rootless-docker/run/docker.sock"
+    golden_root: str = "/data/webarena/mp/golden"
+    config_files_root: str = "/data/webarena/mp/config_files"
+    auth_root: str = "/data/webarena/mp/auth"
     ssh_host: str = ""
-    result_dir: str = "/z/wangcy07/webarena/mp/results"
+    result_dir: str = "/data/webarena/mp/results"
     map_replicas: int = 1
     readonly_url_overrides: dict[str, str] = dataclasses.field(
         default_factory=lambda: {
-            "wikipedia": "http://158.130.4.158:8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing",
-            "map": "http://158.130.4.158:13000",
-            "homepage": "http://158.130.4.158:4399",
+            "wikipedia": "http://127.0.0.1:8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing",
+            "map": "http://127.0.0.1:13000",
+            "homepage": "http://127.0.0.1:4399",
         }
     )
 
@@ -142,7 +142,7 @@ class MPConfig:
         if worker_id < 0 or worker_id >= self.num_workers:
             raise ValueError(f"worker_id {worker_id} out of range [0,{self.num_workers})")
         port = BASE_PORTS[site] + self.port_stride * worker_id
-        # Skip ports reserved by shared resources (e.g. the map container on hilbit2).
+        # Skip ports reserved by shared resources (e.g. the map container on deploy-host).
         while port in _HOST_PORT_RESERVED:
             port += 10
         return port

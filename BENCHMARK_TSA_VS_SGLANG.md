@@ -24,7 +24,7 @@ The agent backend is the only thing that varies between the two runs.
 ## 2. Architecture
 
 ```
-                hilbit2 (orchestrator host, no GPU)
+                deploy-host (orchestrator host, no GPU)
   ┌──────────────────────────────────────────────────────┐
   │  mp.orchestrator  ──▶  N workers (Playwright)        │
   │       │                       │                      │

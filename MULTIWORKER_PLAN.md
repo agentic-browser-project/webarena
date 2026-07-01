@@ -1,6 +1,6 @@
 # WebArena multi-worker benchmark: design plan
 
-I investigated this end-to-end against the actual repo and the live containers on hilbit2 before writing this. Concrete findings are folded in throughout; everywhere there's a number, it came from a measurement, not a guess.
+I investigated this end-to-end against the actual repo and the live containers on deploy-host before writing this. Concrete findings are folded in throughout; everywhere there's a number, it came from a measurement, not a guess.
 
 ## 1 — Problem statement
 
@@ -23,7 +23,7 @@ The combined failure mode of `parallel_run.sh` (5 tmux panes hitting one backend
 | Sites in tasks | shopping 192, shopping_admin 184, gitlab 204, reddit 129, map 128, wikipedia 23 (overlap from cross-site tasks) | task scan |
 | Effectively read-only sites | wikipedia, map, homepage | task scan + image inspection |
 | Mutable sites | shopping, shopping_admin, reddit, gitlab | task scan + DB presence |
-| Server | hilbit2: 128 CPU, 2.0 TiB RAM, 22 TB free on /z, overlayfs | `nproc`, `free`, `df`, `docker info` |
+| Server | deploy-host: 128 CPU, 2.0 TiB RAM, 22 TB free on /z, overlayfs | `nproc`, `free`, `df`, `docker info` |
 | Container live data | shopping 1.25 GB, shopping_admin 155 MB, forum 2.65 GB, gitlab 24.1 GB | `docker ps -s` |
 | DB sizes | shopping mysql 925 MB; gitlab postgres 5.9 GB + git-data 13 GB + gitlab-rails 3.4 GB; forum postgres (DB `postmill`) | `du -sh`, `psql -l` |
 | Shopping table count / order count | 371 tables, 189 orders, 27 customers, 308 939 reviews | `mysql magentodb` |
@@ -110,7 +110,7 @@ This is the load-bearing table — every later step refers back here.
 ### 4.7 Homepage (Flask, port 4399)
 - Stateless. Shared.
 
-## 5 — Per-worker replica layout on hilbit2
+## 5 — Per-worker replica layout on deploy-host
 
 ```
 worker[w] (w ∈ 0..N-1) owns:
@@ -122,7 +122,7 @@ shared, no replication:
   wikipedia, map, homepage on their existing ports
 ```
 
-**Port arithmetic** is deliberately spaced (10 apart, not 1) to leave room for in-image side ports (Magento uses 80 only, but GitLab Workhorse and registry have peers). For N=8 workers the per-worker URLs would be e.g. `shopping_3 = http://hilbit2:7800`.
+**Port arithmetic** is deliberately spaced (10 apart, not 1) to leave room for in-image side ports (Magento uses 80 only, but GitLab Workhorse and registry have peers). For N=8 workers the per-worker URLs would be e.g. `shopping_3 = http://deploy-host:7800`.
 
 **Disk budget** for N=8 (worst case): 8 × 24 GB GitLab CoW + 8 × 1.25 GB shopping + 8 × 2.65 GB forum + 8 × 0.15 GB shopping_admin ≈ 225 GB. Against 22 TB free, this is 1%. Image layers are shared via overlayfs, so the base images cost nothing extra.
 
@@ -216,7 +216,7 @@ Critical bug to avoid: `run.py:260-269` runs `auto_login.py` *as a subprocess on
 
 **Lease:** None needed for in-process workers — they hold the task until they put a result. For crash recovery, the orchestrator runs each worker as a subprocess and re-enqueues the task on SIGCHLD if no result was produced.
 
-**Per-worker URL env override:** the worker process exports `SHOPPING=http://hilbit2:$((7770+10*w))` (etc.) and only then imports `browser_env` (because `env_config.py:9` reads env at import time).
+**Per-worker URL env override:** the worker process exports `SHOPPING=http://deploy-host:$((7770+10*w))` (etc.) and only then imports `browser_env` (because `env_config.py:9` reads env at import time).
 
 ### 7.6 Changes to existing files (minimal)
 
@@ -318,12 +318,12 @@ If any of (1)–(4) fails, the run produces non-comparable numbers. The implemen
 
 | Phase | Deliverable | Validation gate |
 |---|---|---|
-| 0 | `mp/config.py`, `mp/bring_up.py`, replicas live on hilbit2 for N=2 | `docker ps` shows 2 replicas of each mutable site, health checks pass |
+| 0 | `mp/config.py`, `mp/bring_up.py`, replicas live on deploy-host for N=2 | `docker ps` shows 2 replicas of each mutable site, health checks pass |
 | 1 | `mp/golden/*` populated; `mp/reset.py` correct for all 4 mutable sites | reset a dirtied replica, diff against golden = 0 (script in `verify_golden.py`) |
 | 2 | `mp/verify_golden.py` end-to-end on N=2 | 0 diffs across all 411 program_html URLs |
 | 3 | `mp/worker.py` + `run.py:--worker_id`; run 10 tasks on N=2 | scores match a hand-run single-worker baseline on the same 10 tasks |
 | 4 | `mp/orchestrator.py` with crash recovery | inject `kill -9` mid-task; run completes with correct score on retry |
-| 5 | Per-worker `config_files_w/{w}/*.json` regeneration | `cat config_files_w/3/389.json | grep -c hilbit2:8053` > 0 |
+| 5 | Per-worker `config_files_w/{w}/*.json` regeneration | `cat config_files_w/3/389.json | grep -c deploy-host:8053` > 0 |
 | 6 | Full 812-task run on N=8 | aggregate score within ±0.5pp of a freshly-rerun serial baseline on the same model |
 | 7 | Optional: shared-replica mode for read-only sites already tested | wikipedia/map/homepage stay single-instance under load |
 

@@ -127,11 +127,15 @@ Shared: homepage `:4399`, wikipedia `:8888`, map `:13000`.
 
 ## 8. Operate
 
-**Reset to pristine golden state** — per-site, usable by **any local user** (the
-socket is `0666`, repo/venv world-readable), no SSH key needed:
+**Reset to pristine golden state** — per-site, usable by **any local user**, no
+SSH key needed. With `SHARE_SOCKET=1` the setup makes this work end-to-end: the
+socket is `0666`, the harness is world-readable, and every ancestor directory of
+both the socket and the repo is made traversable (`o+x`) — otherwise a `0700`/
+`0750` `$HOME` silently blocks other users from ever reaching the socket. `mp/`
+uses only the standard library, so any user's `python3` works (no venv):
 ```bash
 DOCKER_HOST=unix://$BASE/rootless-docker/run/docker.sock \
-PYTHONPATH=$REPO "$VENV/bin/python" -m mp.reset_cli \
+PYTHONPATH=$REPO python3 -m mp.reset_cli \
     --site all --worker 0 --config "$REPO/mp/config.json"
 ```
 Magento/Postmill reset is a ~25–110 s physical datadir swap; GitLab restores via

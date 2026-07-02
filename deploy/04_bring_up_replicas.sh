@@ -32,5 +32,6 @@ rc=$?
 log "mp.bring_up exit=$rc"
 
 share_socket
+share_paths
 log "running containers:"; docker ps --format '  {{.Names}}\t{{.Status}}' | sort
 exit "$rc"

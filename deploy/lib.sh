@@ -109,6 +109,31 @@ share_socket() {
   chmod 0666 "$DOCKER_SOCK" && log "socket opened 0666 (shared reset access)"
 }
 
+# Add the directory search bit (o+x) to every ancestor of $1, walking up to '/'.
+# o+x (not o+r) means other users can traverse THROUGH to a known path without
+# being able to list the directory, so private siblings (e.g. ~/.ssh at 0700)
+# stay protected. Non-owned/system dirs already have o+x, so failures are benign.
+_grant_traverse() {
+  local p; p="$(cd "$1" 2>/dev/null && pwd)" || return 0
+  while [ -n "$p" ] && [ "$p" != "/" ]; do
+    chmod o+x "$p" 2>/dev/null || true
+    p="$(dirname "$p")"
+  done
+}
+
+# A 0666 socket is NOT enough for "any SSH user can reset": every ancestor dir
+# of BOTH the socket and the repo must also be traversable, or other users can't
+# reach them (e.g. a 0700/0750 $HOME blocks everything beneath it). When the
+# socket is shared, grant o+x up both chains and make the harness world-readable
+# so any local account can import mp.* and read config.json. Idempotent.
+share_paths() {
+  [ "${SHARE_SOCKET:-0}" = "1" ] || return 0
+  _grant_traverse "$(dirname "$DOCKER_SOCK")"
+  _grant_traverse "$REPO"
+  chmod -R o+rX "$REPO/mp" 2>/dev/null || true
+  log "shared paths: socket + repo ancestors made o+x, mp/ world-readable"
+}
+
 # Start a 0.0.0.0:<listen> -> 127.0.0.1:<target> bridge (idempotent per name).
 run_proxy() {
   local name="$1" listen="$2" target="$3" pidf="$PIDS/proxy-$1.pid"

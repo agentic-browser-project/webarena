@@ -7,4 +7,5 @@ log "=== 01: rootless docker ==="
 ensure_rootless_docker
 fix_rootless_dns
 share_socket
+share_paths
 docker info --format 'Server {{.ServerVersion}} | driver {{.Driver}} | root {{.DockerRootDir}}'

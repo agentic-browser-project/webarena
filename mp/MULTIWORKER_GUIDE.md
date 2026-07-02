@@ -42,7 +42,7 @@ For N=8 workers (recommended), needs roughly:
 | Disk | ≥ 250 GB free | Each GitLab CoW layer ~24 GB; goldens ~22 GB for gitlab |
 | Internet | Direct or via SSH tunnel | For LLM API calls (OpenAI or Ollama) |
 
-The hilbit2 reference deployment uses **rootless docker** rooted at `/z/wangcy07/webarena/rootless-docker/data` (the data-root is on the large `/z` mount, not the small system disk).
+The deploy-host reference deployment uses **rootless docker** rooted at `/data/webarena/rootless-docker/data` (the data-root is on the large `/z` mount, not the small system disk).
 
 ### 2.2 LLM backend
 
@@ -98,21 +98,21 @@ Edit defaults in `mp/config.py` or pass overrides to `mp.bring_up`. The key conf
 ```python
 MPConfig(
     num_workers=8,           # N
-    host="158.130.4.158",    # public host the agent and evaluator hit
+    host="HOST_IP",    # public host the agent and evaluator hit
     port_stride=100,         # spacing between worker ports. 100 prevents
                              # *site-to-site* collisions for N up to 8, but
                              # it does NOT dodge shared-service collisions —
-                             # the map container on hilbit2 binds 8080/8085
+                             # the map container on deploy-host binds 8080/8085
                              # (127.0.0.1), and rootless docker's port
                              # allocator treats that as collision with a new
                              # 0.0.0.0:8080 bind. mp/config.py:_HOST_PORT_RESERVED
                              # skips these by shifting +10 (e.g. shopping_admin
                              # w3 → 8090 instead of 8080).
-    docker_host="unix:///z/wangcy07/webarena/rootless-docker/run/docker.sock",
-    golden_root="/z/wangcy07/webarena-mp/golden",
-    config_files_root="/z/wangcy07/webarena-mp/config_files",
-    auth_root="/z/wangcy07/webarena-mp/auth",
-    result_dir="/z/wangcy07/webarena-mp/results",
+    docker_host="unix:///data/webarena/rootless-docker/run/docker.sock",
+    golden_root="/data/webarena-mp/golden",
+    config_files_root="/data/webarena-mp/config_files",
+    auth_root="/data/webarena-mp/auth",
+    result_dir="/data/webarena-mp/results",
 )
 ```
 
@@ -213,7 +213,7 @@ Open a Playwright trace with `playwright show-trace <result_dir>/w0/traces/389.z
 | 1 | ~40 h | 8 GB | 25 GB | reproduce stock single-worker |
 | 2 | ~20 h | 16 GB | 50 GB | conservative first parallel run |
 | 4 | ~10 h | 32 GB | 100 GB | recommended |
-| 8 | ~5 h | 70 GB | 225 GB | aggressive; fits hilbit2 fine |
+| 8 | ~5 h | 70 GB | 225 GB | aggressive; fits deploy-host fine |
 | 16+ | tail-bounded | 140 GB+ | 450 GB+ | map server may saturate; consider `--map_replicas N_map` |
 
 LLM throughput is often the bottleneck — if you use a single shared Ollama on one GPU, N workers contend for the same GPU and effective throughput per worker drops by ~1/N.
@@ -242,7 +242,7 @@ LLM throughput is often the bottleneck — if you use a single shared Ollama on 
 
 **Fix**: `mp/reset.py` defaults to a **physical datadir swap**. At bring-up, after each replica's per-worker base_url is configured, `snapshot_all_datadirs()` makes a pristine on-container copy of the DB data directory (`/var/lib/mysql.golden` for Magento, `/usr/local/pgsql/data.golden` for Postmill). Reset then: stops the DB via supervisor → `cp -a` the golden tree back over the live datadir → starts the DB → clears caches → in-container HTTP/DB health probe. This is a bulk sequential copy that skips every per-commit fsync and index rebuild.
 
-Measured on hilbit2 (`shopping_admin`): **logical restore 2+ hours → physical swap ~85 s end-to-end** (the pure datadir swap is ~24 s; the rest is cache-clear + storefront warmup to first 302). The swap also resets filesystem drift (sessions, generated code) that a DB-only restore would miss — strictly more rigorous.
+Measured on deploy-host (`shopping_admin`): **logical restore 2+ hours → physical swap ~85 s end-to-end** (the pure datadir swap is ~24 s; the rest is cache-clear + storefront warmup to first 302). The swap also resets filesystem drift (sessions, generated code) that a DB-only restore would miss — strictly more rigorous.
 
 Operational notes:
 * The golden datadir snapshot lives in the container's writable layer, so it is **lost if the container is recreated** (manual `docker rm` + `docker run`). Re-create it by re-running `mp.bring_up` (idempotent) or calling `snapshot_all_datadirs(client, cfg)` directly.
@@ -307,7 +307,7 @@ For any task you want a full pre-task reset on, override `require_reset` to `tru
 import json, pathlib
 TASKS = [470, 471, 472, 473, 474]            # the task ids you plan to run
 N_WORKERS = 7                                # match cfg.num_workers
-CONFIG_FILES_ROOT = "/z/wangcy07/webarena-mp/config_files"
+CONFIG_FILES_ROOT = "/data/webarena-mp/config_files"
 
 for w in range(N_WORKERS):
     for tid in TASKS:
@@ -385,7 +385,7 @@ To prove a run is correct (not just complete):
    assert c0m["start_url"] == c1m["start_url"]  # map → shared
    ```
 
-3. **Traces show navigations to the worker's own host:port — no other.** The `goto`-only check below is too narrow; assets, frames, and redirects also reveal which replica was hit. The stronger check counts every `158.130.4.158:PORT` occurrence in the trace and asserts only the expected port appears:
+3. **Traces show navigations to the worker's own host:port — no other.** The `goto`-only check below is too narrow; assets, frames, and redirects also reveal which replica was hit. The stronger check counts every `HOST_IP:PORT` occurrence in the trace and asserts only the expected port appears:
    ```python
    import zipfile, json, re, collections
    def trace_port_hits(zip_path):
@@ -477,13 +477,13 @@ For comparing **TreeSparseAttention (TSA)** against an **SGLang dense baseline**
 ### 8.1 Architecture (single-GPU host)
 
 ```
-   hilbit2 (websites, no GPU)
+   deploy-host (websites, no GPU)
         │
         │  mp/orchestrator.py → workers → Playwright → docker site replicas
         │
         │  SSH tunnels (autossh)
         ▼
-   gray (RTX 5060 Ti or B200)
+   inference-host (RTX 5060 Ti or B200)
         ├─ tmux "wa-tsa"   →  TSA serve.py        : 10000  (model="tree-sparse")
         ├─ tmux "wa-dense" →  SGLang launch_server: 10001  (model="qwen3vl-dense")
         └─ tmux "wa-judge" →  SGLang launch_server: 10002  (model="qwen3vl-judge")
@@ -540,7 +540,7 @@ Each row now records which backend produced it:
 ### 8.5 One-time setup (on the GPU host)
 
 ```bash
-ssh wangcy07@gray.cis.upenn.edu
+ssh user@inference-host
 # 1. Pre-download Qwen3-VL-4B-Instruct
 huggingface-cli download Qwen/Qwen3-VL-4B-Instruct \
     --local-dir ~/hf_models/Qwen3-VL-4B-Instruct
@@ -556,13 +556,13 @@ TS_CUDA_ARCHS="100;120" python -c \
 ### 8.6 End-to-end run
 
 ```bash
-# Activate venv + env on hilbit2
-ssh wangcy07@hilbit2.cis.upenn.edu
-source /z/wangcy07/webarena-venv/bin/activate
-cd /z/wangcy07/webarena-repo
-export PLAYWRIGHT_BROWSERS_PATH=/z/wangcy07/pw_browsers
-export TIKTOKEN_CACHE_DIR=/z/wangcy07/tiktoken_cache
-export NLTK_DATA=/z/wangcy07/nltk_data
+# Activate venv + env on deploy-host
+ssh user@deploy-host
+source /data/webarena-venv/bin/activate
+cd /data/webarena-repo
+export PLAYWRIGHT_BROWSERS_PATH=/data/pw_browsers
+export TIKTOKEN_CACHE_DIR=/data/tiktoken_cache
+export NLTK_DATA=/data/nltk_data
 
 # === TSA run ===
 source mp/launch_tsa.sh          # boots judge, then TSA; exports env vars
@@ -596,8 +596,8 @@ python -m mp.orchestrator \
 
 # === Compare ===
 python -m mp.benchmark_compare \
-    --tsa  /z/wangcy07/webarena-mp/results-tsa/scores.jsonl \
-    --dense /z/wangcy07/webarena-mp/results-dense/scores.jsonl \
+    --tsa  /data/webarena-mp/results-tsa/scores.jsonl \
+    --dense /data/webarena-mp/results-dense/scores.jsonl \
     --tasks config_files/test.raw.json \
     --out comparison_report.md --csv comparison.csv
 
@@ -745,7 +745,7 @@ This appendix lists every code change relative to vanilla WebArena that the mult
 ## E. New directories created at bring-up
 
 ```
-<golden_root>/                  e.g. /z/wangcy07/webarena-mp/golden/
+<golden_root>/                  e.g. /data/webarena-mp/golden/
   shopping/golden.sql           Magento DB dump
   shopping_admin/golden.sql
   reddit/golden.dump            Postgres custom format
@@ -753,7 +753,7 @@ This appendix lists every code change relative to vanilla WebArena that the mult
   reddit/media_cache.tar
   gitlab/                       Filesystem mirror of /var/opt/gitlab (~22 GB)
 
-<config_files_root>/            e.g. /z/wangcy07/webarena-mp/config_files/
+<config_files_root>/            e.g. /data/webarena-mp/config_files/
   w0/                           812 JSON files with worker_0's URLs
     0.json
     1.json
@@ -763,7 +763,7 @@ This appendix lists every code change relative to vanilla WebArena that the mult
   ...
   w{N-1}/
 
-<auth_root>/                    e.g. /z/wangcy07/webarena-mp/auth/
+<auth_root>/                    e.g. /data/webarena-mp/auth/
   w0/                           Per-worker cookie/storage state
     shopping_state.json
     shopping.shopping_admin_state.json
@@ -771,7 +771,7 @@ This appendix lists every code change relative to vanilla WebArena that the mult
   w1/
   ...
 
-<result_dir>/                   e.g. /z/wangcy07/webarena-mp/results/
+<result_dir>/                   e.g. /data/webarena-mp/results/
   scores.jsonl                  Append-only one-result-per-line
   smoke.log                     Stdout of the orchestrator
   logs/

@@ -1,0 +1,42 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 682e2b1..c3321f8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -27,7 +27,7 @@ set(CMAKE_CUDA_STANDARD 17)
+ 
+ # Set CUDA architecture for Blackwell B200 (compute capability 100)
+ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+-    set(CMAKE_CUDA_ARCHITECTURES "100")
++    set(CMAKE_CUDA_ARCHITECTURES "90")
+ endif()
+ 
+ project(_tree_sparse_kernels LANGUAGES CUDA CXX)
+@@ -104,8 +104,8 @@ find_library(TORCH_PYTHON_LIBRARY torch_python PATH "${TORCH_INSTALL_PREFIX}/lib
+ # PyTorch adds many architectures including compute_50 which CUDA 13.1 doesn't support
+ # We need to clear PyTorch's CUDA flags and set only compute_100
+ string(REGEX REPLACE "-gencode arch=compute_[0-9]+[a-z]?,code=sm_[0-9]+[a-z]?" "" CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS}")
+-set(CMAKE_CUDA_ARCHITECTURES "100")
+-set(CMAKE_CUDA_ARCHITECTURES_ALL "100")
++set(CMAKE_CUDA_ARCHITECTURES "90")
++set(CMAKE_CUDA_ARCHITECTURES_ALL "90")
+ 
+ # Add PyBind11
+ add_subdirectory(${CMAKE_SOURCE_DIR}/3rdparty/pybind11 ${CMAKE_BINARY_DIR}/pybind11)
+@@ -164,7 +164,7 @@ target_compile_options(_tree_sparse_kernels PRIVATE
+         --use_fast_math
+         -O3
+         -ccbin=/usr/bin/g++
+-        --generate-code=arch=compute_100,code=sm_100
++        --generate-code=arch=compute_90,code=sm_90
+     >
+ )
+ 
+@@ -181,7 +181,7 @@ target_link_libraries(_tree_sparse_kernels PRIVATE
+ set_target_properties(_tree_sparse_kernels PROPERTIES
+     CXX_STANDARD 17
+     CUDA_STANDARD 17
+-    CUDA_ARCHITECTURES "100"  # Override PyTorch's architectures (force B200 only)
++    CUDA_ARCHITECTURES "90"  # Override PyTorch's architectures (force B200 only)
+     POSITION_INDEPENDENT_CODE ON
+ )
+ 

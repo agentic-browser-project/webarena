@@ -1,0 +1,40 @@
+diff --git a/include/flashinfer/handler.cuh b/include/flashinfer/handler.cuh
+index e3c6a42b..6d41ac44 100644
+--- a/include/flashinfer/handler.cuh
++++ b/include/flashinfer/handler.cuh
+@@ -306,6 +306,7 @@ cudaError_t BatchDecodeWithPagedKVCacheWrapper(
+       rope_theta, stream);
+ }
+ 
++#if 0  // TSA: BatchPrefill wrappers unused by decode path
+ template <PageStorage page_storage, QKVLayout kv_layout, uint32_t GROUP_SIZE, uint32_t HEAD_DIM,
+           RotaryMode ROTARY_MODE, bool ALLOW_FP16_QK_REDUCTION, bool CAUSAL, typename DTypeIn,
+           typename DTypeOut, typename IdType>
+@@ -439,6 +440,7 @@ cudaError_t BatchPrefillWithRaggedKVCacheWrapper(
+                                  })})})})});
+   return cudaSuccess;
+ }
++#endif  // TSA-guard-end (handler prefill wrappers)
+ 
+ }  // namespace flashinfer
+ #endif  // FLASHINFER_HANDLER_CUH_
+diff --git a/include/flashinfer/prefill.cuh b/include/flashinfer/prefill.cuh
+index 4bc3d356..b438687c 100644
+--- a/include/flashinfer/prefill.cuh
++++ b/include/flashinfer/prefill.cuh
+@@ -1313,6 +1313,7 @@ __global__ void BatchPrefillWithPagedKVCacheKernel(
+  * \param stream The cuda stream to execute the kernel on.
+  * \return status Indicates whether CUDA calls are successful
+  */
++#if 0  // TSA: host prefill wrappers unused by decode path; SWITCH macros break under CUDA13 nvcc
+ template <typename DTypeIn, typename DTypeOut>
+ cudaError_t SinglePrefillWithKVCacheWorkEstimation(
+     uint32_t& tmp_size, uint32_t& max_grid_size, uint32_t num_qo_heads, uint32_t num_kv_heads,
+@@ -1919,6 +1920,7 @@ cudaError_t BatchPrefillWithPagedKVCache(
+   FLASHINFER_CUDA_CALL(cudaFreeAsync(tile_indices_d, stream));
+   return cudaSuccess;
+ }
++#endif  // TSA-guard-end (host prefill wrappers)
+ 
+ }  // namespace flashinfer
+ 

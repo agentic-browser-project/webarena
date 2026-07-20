@@ -172,3 +172,6 @@ mp/configs/config-dense.json
 mp/configs/config-tsa-b200.json
 mp/configs/config-dense-b200.json
 
+
+# local HF dataset export (uploaded to HF, not versioned here)
+hf_export/
